@@ -1,13 +1,16 @@
 """TransOrchestra FastAPI application entry point."""
 
 import logging
+import os
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import router
+# config must be the first project import so LangSmith env vars are set
+# before any LangChain module is loaded.
 from backend.config import EMBEDDING_MODEL, LLM_MODEL
+from backend.api.routes import router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +41,12 @@ async def startup_event() -> None:
     logger.info("TransOrchestra API starting...")
     logger.info("Embedding model: %s", EMBEDDING_MODEL)
     logger.info("LLM model: %s", LLM_MODEL)
+    tracing = os.getenv("LANGCHAIN_TRACING_V2", "false").lower()
+    project = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
+    if tracing == "true":
+        logger.info("LangSmith tracing: ENABLED → project '%s'", project)
+    else:
+        logger.info("LangSmith tracing: disabled (set LANGCHAIN_TRACING_V2=true to enable)")
 
 
 if __name__ == "__main__":

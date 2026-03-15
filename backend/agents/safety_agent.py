@@ -12,7 +12,12 @@ from backend.config import (
     TAVILY_API_KEY,
 )
 from backend.rag.embeddings import get_embedding_model
-from backend.rag.pipeline import build_rag_chain, check_relevance_score, run_query_with_docs
+from backend.rag.pipeline import (
+    build_rag_chain,
+    check_relevance_score,
+    run_query_with_docs,
+    run_query_with_web_context,
+)
 from backend.rag.retriever import build_hybrid_retriever, build_reranking_retriever
 from backend.rag.vectorstore import load_vectorstore
 
@@ -37,23 +42,34 @@ def _load_pipeline():
     return retriever, chain
 
 
-def _run_tavily_search(query: str) -> str:
-    """Execute a Tavily web search and return formatted results with [WEB SOURCE] prefix."""
+def _run_tavily_search(query: str) -> List[Document]:
+    """Execute a Tavily web search and return results as Document objects.
+
+    Each result becomes a Document whose metadata 'source' is the page title
+    (prefixed with [WEB]) and 'page' holds the URL — matching the same
+    source-attribution format used for PDF chunks.
+    """
     try:
         from tavily import TavilyClient
 
         client = TavilyClient(api_key=TAVILY_API_KEY)
         results = client.search(query=query, max_results=3)
-        parts = []
+        docs: List[Document] = []
         for r in results.get("results", []):
             title = r.get("title", "Web result")
             content = r.get("content", "")
             url = r.get("url", "")
-            parts.append(f"[WEB SOURCE] {title}\n{content}\nURL: {url}")
-        return "\n\n".join(parts)
+            docs.append(
+                Document(
+                    page_content=content,
+                    metadata={"source": f"[WEB] {title}", "page": url},
+                )
+            )
+        logger.info("Tavily returned %d web result(s) for query.", len(docs))
+        return docs
     except Exception as exc:
         logger.error("Tavily search failed: %s", exc)
-        return ""
+        return []
 
 
 def safety_agent_node(state: AgentState) -> AgentState:
@@ -81,23 +97,30 @@ def safety_agent_node(state: AgentState) -> AgentState:
         error_msg = f"Pipeline load error: {exc}"
         return {**state, "rag_answer": error_msg, "rag_sources": [], "web_search_used": False, "final_answer": error_msg}
 
-    # Corrective RAG: fall back to Tavily when relevance is low.
+    # Corrective RAG: fall back to Tavily when local relevance is low.
+    web_docs: List[Document] = []
     try:
         score = check_relevance_score(retriever, query)
         logger.info("Relevance score: %.3f (threshold: %.3f)", score, RELEVANCE_SCORE_THRESHOLD)
 
         if score < RELEVANCE_SCORE_THRESHOLD and TAVILY_API_KEY:
             logger.info("Low relevance score — triggering Tavily web search.")
-            web_context = _run_tavily_search(query)
-            if web_context:
-                query = f"{web_context}\n\nOriginal question: {query}"
+            web_docs = _run_tavily_search(query)
+            if web_docs:
                 web_search_used = True
     except Exception as exc:
         logger.warning("Relevance check failed: %s — proceeding without web search.", exc)
 
+    def _run_with_retriever(ret, chn) -> dict:
+        """Run query through ret/chn, injecting web_docs into context when present."""
+        if web_docs:
+            # FIX: inject web results as real context documents, not into the query string.
+            return run_query_with_web_context(ret, query, web_docs)
+        return run_query_with_docs(chn, ret, query)
+
     # Run RAG — with automatic fallback to hybrid retriever if reranker fails (e.g. bad API key).
     try:
-        result = run_query_with_docs(chain, retriever, query)
+        result = _run_with_retriever(retriever, chain)
         return {
             **state,
             "rag_answer": result["answer"],
@@ -121,7 +144,7 @@ def safety_agent_node(state: AgentState) -> AgentState:
                 ]
                 fallback_retriever = build_hybrid_retriever(vectorstore, docs_fallback)
                 fallback_chain = build_rag_chain(fallback_retriever)
-                result = run_query_with_docs(fallback_chain, fallback_retriever, query)
+                result = _run_with_retriever(fallback_retriever, fallback_chain)
                 logger.info("Fallback to hybrid retriever succeeded.")
                 return {
                     **state,

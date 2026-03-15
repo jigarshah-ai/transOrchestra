@@ -7,6 +7,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── LangSmith tracing ──────────────────────────────────────────────────────────
+# Must be set in os.environ BEFORE any LangChain module is imported so that
+# the LangChain callback machinery picks them up at import time.
+os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
+os.environ["LANGCHAIN_ENDPOINT"] = os.getenv(
+    "LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com"
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Core API keys ──────────────────────────────────────────────────────────────

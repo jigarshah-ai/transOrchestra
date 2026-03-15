@@ -1,0 +1,77 @@
+[
+  {
+    "question": "Can a driver transport hazardous materials without a CDL HazMat endorsement?",
+    "ground_truth": "No. Per 49 CFR 383.93, drivers transporting hazardous materials requiring placards must hold a valid CDL with HazMat endorsement, which requires a TSA security threat assessment.",
+    "category": "hazmat"
+  },
+  {
+    "question": "What does placard 1203 indicate on a tanker truck?",
+    "ground_truth": "Placard 1203 identifies gasoline, a flammable liquid. Per 49 CFR 172.504, any quantity of gasoline transported in bulk requires this placard on all four sides of the vehicle.",
+    "category": "hazmat"
+  },
+  {
+    "question": "How far must a HazMat vehicle park from an open fire?",
+    "ground_truth": "Per 49 CFR 397.13, a vehicle carrying hazardous materials must not be parked within 300 feet of an open fire.",
+    "category": "hazmat"
+  },
+  {
+    "question": "How many hours can a property-carrying driver drive before a mandatory rest break?",
+    "ground_truth": "Per 49 CFR 395.3, a driver may not drive more than 8 hours without taking at least a 30-minute break.",
+    "category": "hours_of_service"
+  },
+  {
+    "question": "What is the 11-hour driving limit for commercial drivers?",
+    "ground_truth": "Under 49 CFR 395.3, a property-carrying driver may drive a maximum of 11 hours after 10 consecutive hours off duty.",
+    "category": "hours_of_service"
+  },
+  {
+    "question": "Can a driver restart their 60/70-hour clock after 34 consecutive hours off?",
+    "ground_truth": "Yes. Per 49 CFR 395.3(c), a driver may restart a 7/8 consecutive day period after taking 34 or more consecutive hours off duty, including two periods from 1am to 5am.",
+    "category": "hours_of_service"
+  },
+  {
+    "question": "What is required under Section 396.11 driver vehicle inspection report?",
+    "ground_truth": "Per 49 CFR 396.11, drivers must complete a written DVIR at the end of each driving day reporting any defects or deficiencies that could affect safe operation or cause a breakdown.",
+    "category": "vehicle_inspection"
+  },
+  {
+    "question": "How often must a commercial motor vehicle receive a periodic inspection?",
+    "ground_truth": "Per 49 CFR 396.17, every commercial motor vehicle must be systematically inspected, repaired, and maintained at least once every 12 months.",
+    "category": "vehicle_inspection"
+  },
+  {
+    "question": "Who can perform the annual inspection on a commercial motor vehicle?",
+    "ground_truth": "Per 49 CFR 396.19, annual inspections must be performed by qualified inspectors who have passed a state or federal training program or can demonstrate equivalent knowledge and skills.",
+    "category": "vehicle_inspection"
+  },
+  {
+    "question": "What is the minimum brake lining thickness allowed before replacement?",
+    "ground_truth": "Per FMCSA regulations under 49 CFR 393.47, brake lining and pads must be replaced when thickness is less than 1/4 inch on steering axles and 1/8 inch on non-steering axles.",
+    "category": "brakes"
+  },
+  {
+    "question": "How quickly must air brakes build pressure from 85 to 100 psi?",
+    "ground_truth": "Per 49 CFR 393.55, air brakes must build air pressure from 85 to 100 psi within 45 seconds with the engine running at maximum governed RPM.",
+    "category": "brakes"
+  },
+  {
+    "question": "What is the maximum push rod stroke for a type 30 brake chamber?",
+    "ground_truth": "Per FMCSA brake adjustment limits, a type 30 brake chamber has a maximum stroke limit of 2.5 inches before the brakes are considered out of adjustment.",
+    "category": "brakes"
+  },
+  {
+    "question": "How many tie-downs are required for cargo between 5 and 10 feet long?",
+    "ground_truth": "Per 49 CFR 393.102, cargo between 5 and 10 feet in length requires a minimum of 2 tie-downs regardless of weight.",
+    "category": "load_securement"
+  },
+  {
+    "question": "What is the minimum working load limit for cargo securement devices?",
+    "ground_truth": "Per 49 CFR 393.102, the aggregate working load limit of all tie-downs must be at least 50% of the weight of the cargo being secured.",
+    "category": "load_securement"
+  },
+  {
+    "question": "Can tarps alone be used as cargo securement for loose bulk materials?",
+    "ground_truth": "No. Per 49 CFR 393.118, vehicles transporting loose materials must use a tarp or other cover to prevent spillage, but this is in addition to required tie-downs, not a substitute for them.",
+    "category": "load_securement"
+  }
+]

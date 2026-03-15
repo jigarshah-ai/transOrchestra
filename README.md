@@ -91,6 +91,7 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Reranker | Cohere rerank-english-v3.0 | langchain-cohere 0.2.4 |
 | Web Search Fallback | Tavily API | tavily-python 0.3.9 |
 | RAG Framework | LangChain | 0.2.16 |
+| Observability & Tracing | LangSmith | ≥ 0.1.112 |
 | Evaluation | Ragas (Faithfulness + Answer Relevancy) | 0.1.21 |
 | Document Loading | PyPDF | 4.3.1 |
 | Text Splitting | langchain-text-splitters | 0.2.4 |
@@ -110,6 +111,7 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Streamlit app with PDF upload + chat | ✅ | `frontend/app.py` |
 | Corrective RAG with web search fallback | ✅ | Tavily triggered when relevance score < threshold |
 | Ragas evaluation | ✅ | `eval/run_ragas.py` — Faithfulness + Answer Relevancy |
+| Observability & production tracing | ✅ | LangSmith — full trace of every LLM call, retriever, and agent hop |
 
 ---
 
@@ -168,6 +170,12 @@ CHUNK_OVERLAP=50
 TOP_K_RETRIEVAL=10
 TOP_K_RERANK=3
 RELEVANCE_SCORE_THRESHOLD=0.6
+
+# LangSmith tracing (optional — set to true to enable)
+LANGCHAIN_TRACING_V2=false
+LANGCHAIN_API_KEY=lsv2_pt_...    # Free at smith.langchain.com
+LANGCHAIN_PROJECT=transOrchestra
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 ```
 
 ### Step 5 — Add regulatory PDF documents
@@ -197,6 +205,7 @@ Expected output:
 INFO: TransOrchestra API starting...
 INFO: Embedding model: BAAI/bge-small-en-v1.5
 INFO: LLM model: gpt-4o-mini
+INFO: LangSmith tracing: ENABLED → project 'transOrchestra'
 INFO: Uvicorn running on http://127.0.0.1:8000
 ```
 
@@ -445,6 +454,70 @@ tests/test_retriever.py::TestBuildRerankingRetriever::test_falls_back_without_co
 | Brakes | "What is the minimum brake lining thickness before replacement?" | `maintenance_query` |
 | Route | "Route from Chicago, IL to Detroit, MI" | `route_query` |
 | Route | "How far is Dallas to Houston?" | `route_query` |
+
+---
+
+## Observability & Monitoring (LangSmith)
+
+TransOrchestra is fully instrumented with **LangSmith** tracing. Every request generates a structured trace capturing the complete execution path through the multi-agent graph — zero code changes to individual modules required. LangChain's callback machinery auto-traces everything once the environment variables are set.
+
+### What gets traced automatically
+
+Every single query produces a trace tree like this:
+
+```
+LangGraph  (root span)
+├── dispatcher          1.05 s   55 tokens
+│   └── gpt-4o-mini    0.52 s   55 tokens    ← intent classification LLM call
+├── route_after_disp…   0.00 s               ← conditional routing decision
+└── safety_agent        5.10 s   1.4K tokens
+    ├── Retriever        0.03 s              ← hybrid retriever (BM25 + Vector)
+    │   ├── BM25Retriever   0.00 s
+    │   └── VectorStoreRetriever  0.03 s
+    └── gpt-4o-mini     1.35 s   1.4K tokens ← final answer generation
+```
+
+Each node records:
+- **Input / Output** — full prompts and responses
+- **Latency** — milliseconds per node
+- **Token counts** — prompt tokens, completion tokens, total
+- **Metadata** — model name, temperature, thread ID
+
+### Setup
+
+1. Get a free API key at [smith.langchain.com](https://smith.langchain.com)
+2. Set in `.env`:
+   ```env
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_API_KEY=lsv2_pt_your_key_here
+   LANGCHAIN_PROJECT=transOrchestra
+   LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+   ```
+3. Restart the FastAPI server — you'll see in the terminal:
+   ```
+   INFO: LangSmith tracing: ENABLED → project 'transOrchestra'
+   ```
+4. Send a query from Streamlit
+5. Open [smith.langchain.com](https://smith.langchain.com) → **Tracing** → **transOrchestra**
+
+### Live trace (confirmed working)
+
+The screenshot below shows a live LangSmith trace from TransOrchestra. You can see the full **LangGraph → dispatcher → safety_agent → Retriever → BM25Retriever + VectorStoreRetriever → gpt-4o-mini** execution tree, with per-node latency and token counts:
+
+> *Trace visible at smith.langchain.com → Projects → transOrchestra*
+>
+> Three queries captured: "can you summarise the Assignment...", "What is the maximum number of driving hours...", "can you summarise the Title 49..."
+>
+> Each shows the full agent chain: LangGraph root → dispatcher (gpt-4o-mini) → route_after_dispatch → safety_agent → Retriever (BM25 + Vector) → gpt-4o-mini answer generation
+
+### Disabling tracing
+
+Set `LANGCHAIN_TRACING_V2=false` (or remove it) in `.env`. The startup log will confirm:
+```
+INFO: LangSmith tracing: disabled (set LANGCHAIN_TRACING_V2=true to enable)
+```
+
+No API calls are made and no data is sent when tracing is off.
 
 ---
 

@@ -14,8 +14,9 @@
 6. [Embedding Model Comparison](#6-embedding-model-comparison)
 7. [Retrieval Strategy Deep-Dive](#7-retrieval-strategy-deep-dive)
 8. [Corrective RAG Flow](#8-corrective-rag-flow)
-9. [Evaluation Framework](#9-evaluation-framework)
-10. [Troubleshooting](#10-troubleshooting)
+9. [Observability & Monitoring — LangSmith](#9-observability--monitoring--langsmith)
+10. [Evaluation Framework](#10-evaluation-framework)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -36,6 +37,10 @@ All configuration is loaded from `.env` via `backend/config.py`. No values are h
 | `TOP_K_RETRIEVAL` | `10` | — | Number of documents fetched by vector/BM25 retriever |
 | `TOP_K_RERANK` | `3` | — | Number of documents after Cohere reranking |
 | `RELEVANCE_SCORE_THRESHOLD` | `0.6` | — | Minimum avg score before Tavily fallback triggers |
+| `LANGCHAIN_TRACING_V2` | `false` | ❌ Optional | Set `true` to enable LangSmith tracing |
+| `LANGCHAIN_API_KEY` | — | ❌ Optional | LangSmith API key (free at smith.langchain.com) |
+| `LANGCHAIN_PROJECT` | `transOrchestra` | — | LangSmith project name for trace grouping |
+| `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | — | LangSmith ingest endpoint |
 
 ---
 
@@ -402,7 +407,10 @@ Query arrives
     ▼
 check_relevance_score(retriever, query)
     │
-    ├── score >= 0.6 ──────────────────────► Run RAG chain directly
+    ├── score >= 0.6 ──────────────────────► run_query_with_docs(chain, retriever, query)
+    │                                              │
+    │                                              ▼
+    │                                         Answer + sources returned
     │
     └── score < 0.6 AND TAVILY_API_KEY set
         │
@@ -410,33 +418,166 @@ check_relevance_score(retriever, query)
     TavilyClient.search(query, max_results=3)
         │
         ▼
-    Prepend web results as:
-    [WEB SOURCE] {title}
-    {content}
-    URL: {url}
-    
-    Original question: {query}
+    Each result → Document(
+        page_content = result["content"],
+        metadata = {
+            "source": "[WEB] {title}",
+            "page":   result["url"]
+        }
+    )
         │
         ▼
-    Run RAG chain with enriched query
+    run_query_with_web_context(retriever, query, web_docs)
+        ├── retriever.invoke(query)   ← clean query, gets local ChromaDB docs
+        ├── all_docs = web_docs + chroma_docs
+        ├── context = _format_docs(all_docs)  ← web docs appear first in context
+        └── llm.invoke(prompt(context, question))
+        │
+        ▼
+    Answer grounded in web + local context
+    Sources include [WEB] entries alongside PDF citations
         │
         ▼
     Set web_search_used = True in state
 ```
 
+**Key design principle:** Tavily results are converted to `Document` objects and injected directly into the LLM `context` slot. The original query string is never modified. This ensures the retriever always searches ChromaDB with the clean user question, and the LLM sees both web and local evidence as properly attributed context chunks.
+
 The relevance threshold (default 0.6) is configurable via `RELEVANCE_SCORE_THRESHOLD`. Lower values mean web search triggers more often; higher values mean the system relies more on indexed documents.
 
 ---
 
-## 9. Evaluation Framework
+## 9. Observability & Monitoring — LangSmith
 
-### Ragas Metrics Explained
+### Overview
+
+TransOrchestra integrates **LangSmith** for full-stack observability of the multi-agent RAG pipeline. LangChain's built-in callback system auto-instruments every LLM call, retriever invocation, and agent node transition — no decorators or manual logging required in individual modules.
+
+LangSmith is configured in a single place (`backend/config.py`) and activated via four environment variables in `.env`.
+
+---
+
+### How It Works — Implementation Detail
+
+`backend/config.py` is imported as the **first project module** in `backend/main.py`. It calls `load_dotenv()` and immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
+
+```python
+# backend/config.py  (runs before any langchain import)
+load_dotenv()
+
+os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
+os.environ["LANGCHAIN_API_KEY"]    = os.getenv("LANGCHAIN_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
+os.environ["LANGCHAIN_ENDPOINT"]   = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+```
+
+When `LANGCHAIN_TRACING_V2=true`, LangChain's `LangSmithCallbackHandler` is registered globally and every `chain.invoke()`, `retriever.invoke()`, and `llm.invoke()` call in the codebase is traced automatically.
+
+---
+
+### Trace Structure
+
+A single query from the Streamlit UI produces a trace tree with the following shape:
+
+```
+LangGraph  (root span — full query latency)
+│
+├── dispatcher                        ~1.0 s
+│   └── ChatOpenAI / gpt-4o-mini      ~0.5 s, ~55 tokens
+│       Input:  classification prompt + user query
+│       Output: "safety_query" | "route_query" | ...
+│
+├── route_after_dispatch              ~0.0 s  (routing decision, no LLM call)
+│
+└── safety_agent                      ~5.1 s, ~1.4K tokens
+    │
+    ├── Retriever                     ~0.03 s  (hybrid ensemble)
+    │   ├── BM25Retriever             ~0.00 s
+    │   └── VectorStoreRetriever      ~0.03 s
+    │
+    └── ChatOpenAI / gpt-4o-mini      ~1.35 s, ~1.4K tokens
+        Input:  system prompt + retrieved context + question
+        Output: final answer with source citations
+```
+
+If Tavily web search fires (low relevance score), an additional `TavilySearch` span appears between the Retriever and the final LLM call.
+
+---
+
+### What Each Span Captures
+
+| Span | Inputs recorded | Outputs recorded | Metrics |
+|---|---|---|---|
+| LangGraph root | Full `AgentState` dict | Final state | Total latency |
+| dispatcher | Classification prompt | Raw LLM text + parsed intent | Latency, tokens |
+| route_after_dispatch | intent string | target node name | Latency |
+| safety_agent | query, retriever config | answer, sources, web_search_used | Latency, tokens |
+| Retriever | query string | List of retrieved Document objects | Latency |
+| BM25Retriever | query string | BM25-ranked documents | Latency |
+| VectorStoreRetriever | query embedding | Cosine-similarity ranked docs | Latency |
+| gpt-4o-mini (answer) | Full formatted prompt with context | Answer text | Latency, tokens, cost |
+
+---
+
+### LangSmith Dashboard Features Used
+
+| Feature | How to access | What it shows |
+|---|---|---|
+| **Traces** | Tracing → transOrchestra | Full run list with input preview and latency |
+| **Trace detail** | Click any run | Expandable tree of all spans |
+| **Input / Output** | Right panel tabs | Full prompt and response text per node |
+| **Metadata** | Right panel → Metadata tab | Model name, temperature, thread_id |
+| **Threads** | Threads tab | Conversation history grouped by thread_id |
+| **Runs** | Runs tab | Flat list of all individual LLM calls |
+
+---
+
+### Environment Variables Reference
+
+```env
+# Enable tracing
+LANGCHAIN_TRACING_V2=true
+
+# Your LangSmith API key — free tier available
+# Get it at: https://smith.langchain.com/settings
+LANGCHAIN_API_KEY=lsv2_pt_...
+
+# Project name — traces appear under this name in the UI
+LANGCHAIN_PROJECT=transOrchestra
+
+# API endpoint (default, no need to change)
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+```
+
+### Startup confirmation
+
+When tracing is enabled, the FastAPI startup log outputs:
+```
+INFO  backend.main — LangSmith tracing: ENABLED → project 'transOrchestra'
+```
+
+When disabled:
+```
+INFO  backend.main — LangSmith tracing: disabled (set LANGCHAIN_TRACING_V2=true to enable)
+```
+
+---
+
+### Disabling Tracing
+
+Set `LANGCHAIN_TRACING_V2=false` in `.env`. No data is sent, no API calls are made, and there is zero performance overhead.
+
+---
+
+## 10. Evaluation Framework
+
+### 10.1 Ragas Metrics Explained
 
 **Faithfulness** measures whether every claim in the generated answer can be traced back to the retrieved context chunks. A score of 1.0 means every statement is grounded; 0.0 means the model hallucinated all of it.
 
 **Answer Relevancy** measures whether the answer actually addresses the question asked. A high-faithfulness but low-relevancy answer would be one that is factually grounded but answers a different question.
 
-### Evaluation Pipeline
+### 10.2 Evaluation Pipeline
 
 ```
 eval_set.json (15 Q&A pairs)
@@ -461,7 +602,7 @@ ragas.evaluate(dataset, metrics=[faithfulness, answer_relevancy])
 Print results table + save to eval/results.json
 ```
 
-### Interpreting Results
+### 10.3 Interpreting Results
 
 | Score Range | Interpretation |
 |---|---|
@@ -481,7 +622,7 @@ Typical causes of low answer relevancy:
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### `chroma-hnswlib` build error on Windows
 
@@ -561,6 +702,26 @@ logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICA
 ### `Number of requested results 10 is greater than number of elements in index 8`
 
 You have fewer than 10 chunks in your vector store. ChromaDB automatically adjusts `n_results` down to the available count — this is informational, not an error. Ingest more PDFs to resolve.
+
+---
+
+### LangSmith traces not appearing
+
+Check in order:
+
+1. **Confirm tracing is enabled** — startup log must say `ENABLED`, not `disabled`
+2. **Check the API key** — go to [smith.langchain.com/settings](https://smith.langchain.com/settings), copy the key exactly, paste into `.env` with no trailing spaces
+3. **Check import order** — `backend/config.py` must be the first project import in `backend/main.py` (before `routes`). The env vars must be set before any `langchain` module is imported.
+4. **Check project name** — in the LangSmith UI, use the **Tracing** → **All projects** view if you don't see `transOrchestra` listed immediately
+5. **Firewall / proxy** — LangSmith sends traces to `https://api.smith.langchain.com`. If your network blocks outbound HTTPS, traces won't arrive. Check with `curl https://api.smith.langchain.com`
+
+If the key is wrong, LangSmith silently drops traces (it doesn't crash the app). Set `LANGCHAIN_TRACING_V2=false` if you want to stop sending data while debugging the key.
+
+---
+
+### LangSmith tracing causes slow queries
+
+LangSmith trace submission is **asynchronous** — it does not block the response path. Queries should not be measurably slower with tracing enabled. If you observe slowness, it is likely unrelated to LangSmith (check OpenAI API latency or Tavily search time in the trace detail view instead).
 
 ---
 

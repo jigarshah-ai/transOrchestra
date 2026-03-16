@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 # ── Storage ────────────────────────────────────────────────────────────────────
 CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
@@ -84,6 +85,11 @@ def _warn_missing_optional_keys() -> None:
     if not TAVILY_API_KEY:
         logger.warning(
             "TAVILY_API_KEY is not set. Corrective web search will be disabled."
+        )
+    if not GOOGLE_MAPS_API_KEY:
+        logger.warning(
+            "GOOGLE_MAPS_API_KEY not set in .env — "
+            "Navigator agent will use realistic mock route data."
         )
 
 

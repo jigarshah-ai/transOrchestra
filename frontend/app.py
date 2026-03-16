@@ -5,8 +5,10 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+import folium
 import requests
 import streamlit as st
+from streamlit_folium import st_folium
 
 # Allow importing backend config from anywhere.
 project_root = Path(__file__).resolve().parent.parent
@@ -30,6 +32,101 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid4())
+
+
+# ── Folium map helper ──────────────────────────────────────────────────────────
+
+def render_route_map(route_data: dict) -> None:
+    """Render an interactive folium map for the given route.
+
+    Shows:
+    - Blue route polyline with distance/time tooltip
+    - Green origin marker and red destination marker
+    - Orange compliance warning markers per state (with HazMat detail popups)
+    Only called when route_data is present — never for RAG answers.
+    """
+    if not route_data or not route_data.get("polyline_coords"):
+        return
+
+    coords = route_data["polyline_coords"]
+    if not coords:
+        return
+
+    mid = coords[len(coords) // 2]
+    m = folium.Map(location=[mid[0], mid[1]], zoom_start=7, tiles="CartoDB positron")
+
+    # Route polyline
+    folium.PolyLine(
+        locations=coords,
+        color="#185FA5",
+        weight=5,
+        opacity=0.85,
+        tooltip=(
+            f"{route_data['distance_text']}  ·  "
+            f"{route_data['duration_in_traffic']}"
+        ),
+    ).add_to(m)
+
+    # Origin marker (green)
+    start = route_data["start_location"]
+    folium.Marker(
+        location=[start["lat"], start["lng"]],
+        popup=folium.Popup(
+            f"<b>Origin</b><br>{route_data['origin']}", max_width=240
+        ),
+        icon=folium.Icon(color="green", icon="play", prefix="fa"),
+    ).add_to(m)
+
+    # Destination marker (red)
+    end = route_data["end_location"]
+    folium.Marker(
+        location=[end["lat"], end["lng"]],
+        popup=folium.Popup(
+            f"<b>Destination</b><br>{route_data['destination']}", max_width=240
+        ),
+        icon=folium.Icon(color="red", icon="flag", prefix="fa"),
+    ).add_to(m)
+
+    # Compliance warning markers (orange) per state
+    for note in route_data.get("compliance_notes", []):
+        center_pt = note.get("center", [39.5, -98.35])
+        permit_txt = " — PERMIT REQUIRED" if note.get("permit_required") else ""
+        popup_html = (
+            f"<b>{note['state']}{permit_txt}</b><br>"
+            f"{note['summary']}<br><br>"
+            f"<small>{note['detail'][:200]}…</small>"
+        )
+        folium.Marker(
+            location=center_pt,
+            popup=folium.Popup(popup_html, max_width=300),
+            icon=folium.Icon(color="orange", icon="warning-sign", prefix="glyphicon"),
+        ).add_to(m)
+
+    # Auto-fit bounds to the full route
+    lats = [c[0] for c in coords]
+    lngs = [c[1] for c in coords]
+    m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+
+    mock_note = (
+        " *(mock data — set `GOOGLE_MAPS_API_KEY` for live routing)*"
+        if route_data.get("mock_data") else ""
+    )
+    st.caption(
+        f"🗺️ {route_data['distance_text']}  ·  "
+        f"{route_data['duration_in_traffic']}{mock_note}"
+    )
+    st_folium(m, height=420, use_container_width=True)
+
+    permit_needed = [
+        n["state"] for n in route_data.get("compliance_notes", [])
+        if n.get("permit_required")
+    ]
+    if permit_needed:
+        st.warning(
+            f"⚠️ **Permit required in: {', '.join(permit_needed)}** — "
+            "review compliance notes in the route details above."
+        )
+
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -92,11 +189,13 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-        if msg["role"] == "assistant" and "meta" in msg:
-            meta = msg["meta"]
+        if msg["role"] == "assistant":
+            # Folium map — only for route queries
+            if msg.get("route_data"):
+                render_route_map(msg["route_data"])
 
-            # Source attribution expander.
-            sources = meta.get("sources", [])
+            # Source citations
+            sources = msg.get("sources", [])
             if sources:
                 with st.expander("📄 Sources"):
                     for src in sources:
@@ -104,26 +203,26 @@ for msg in st.session_state.messages:
                         page = src.get("page", "?")
                         st.markdown(f"- **{filename}** — page {page}")
 
-            # Status badges.
+            # Status badges
             badge_cols = st.columns([1, 1, 4])
-            with badge_cols[0]:
-                intent = meta.get("intent", "")
-                if intent:
+            intent = msg.get("intent", "")
+            if intent:
+                with badge_cols[0]:
                     st.markdown(
                         f"<span style='background:#2563eb;color:white;padding:2px 8px;"
                         f"border-radius:4px;font-size:0.75rem'>Intent: {intent}</span>",
                         unsafe_allow_html=True,
                     )
-            with badge_cols[1]:
-                if meta.get("web_search_used"):
+            if msg.get("web_search_used"):
+                with badge_cols[1]:
                     st.markdown(
                         "<span style='background:#16a34a;color:white;padding:2px 8px;"
                         "border-radius:4px;font-size:0.75rem'>🌐 Web search used</span>",
                         unsafe_allow_html=True,
                     )
-            with badge_cols[2]:
-                latency = meta.get("latency_ms")
-                if latency:
+            latency = msg.get("latency_ms")
+            if latency:
+                with badge_cols[2]:
                     st.caption(f"⏱ {latency} ms")
 
 # ── Chat input ─────────────────────────────────────────────────────────────────
@@ -152,16 +251,19 @@ if user_input:
                 data = resp.json()
 
                 answer = data.get("answer", "No answer returned.")
+                route_data = data.get("route_data")
+                sources = data.get("sources", [])
+                intent = data.get("intent", "")
+                web_search_used = data.get("web_search_used", False)
+                latency_ms = data.get("latency_ms")
+
                 st.markdown(answer)
 
-                meta = {
-                    "sources": data.get("sources", []),
-                    "intent": data.get("intent", ""),
-                    "web_search_used": data.get("web_search_used", False),
-                    "latency_ms": data.get("latency_ms"),
-                }
+                # Folium map — only rendered when navigator returned route_data
+                if route_data:
+                    render_route_map(route_data)
 
-                sources = meta["sources"]
+                # Source citations
                 if sources:
                     with st.expander("📄 Sources"):
                         for src in sources:
@@ -169,28 +271,36 @@ if user_input:
                             page = src.get("page", "?")
                             st.markdown(f"- **{filename}** — page {page}")
 
+                # Status badges
                 badge_cols = st.columns([1, 1, 4])
-                with badge_cols[0]:
-                    if meta["intent"]:
+                if intent:
+                    with badge_cols[0]:
                         st.markdown(
                             f"<span style='background:#2563eb;color:white;padding:2px 8px;"
-                            f"border-radius:4px;font-size:0.75rem'>Intent: {meta['intent']}</span>",
+                            f"border-radius:4px;font-size:0.75rem'>Intent: {intent}</span>",
                             unsafe_allow_html=True,
                         )
-                with badge_cols[1]:
-                    if meta["web_search_used"]:
+                if web_search_used:
+                    with badge_cols[1]:
                         st.markdown(
                             "<span style='background:#16a34a;color:white;padding:2px 8px;"
                             "border-radius:4px;font-size:0.75rem'>🌐 Web search used</span>",
                             unsafe_allow_html=True,
                         )
-                with badge_cols[2]:
-                    if meta["latency_ms"]:
-                        st.caption(f"⏱ {meta['latency_ms']} ms")
+                if latency_ms:
+                    with badge_cols[2]:
+                        st.caption(f"⏱ {latency_ms} ms")
 
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer, "meta": meta}
-                )
+                # Persist message including route_data for map re-render on rerun
+                st.session_state.messages.append({
+                    "role":            "assistant",
+                    "content":         answer,
+                    "sources":         sources,
+                    "intent":          intent,
+                    "web_search_used": web_search_used,
+                    "latency_ms":      latency_ms,
+                    "route_data":      route_data,
+                })
 
             except requests.exceptions.ConnectionError:
                 warning_msg = (

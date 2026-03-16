@@ -81,15 +81,17 @@ def run_graph(query: str, thread_id: str = "default") -> dict:
         "web_search_used": False,
         "final_answer": "",
         "thread_id": thread_id,
+        "route_data": None,
     }
 
     try:
         final_state = compiled.invoke(initial_state, config=config)
         return {
-            "answer": final_state.get("final_answer", "No answer generated."),
-            "sources": final_state.get("rag_sources", []),
-            "intent": final_state.get("intent", "unknown"),
+            "answer":          final_state.get("final_answer", "No answer generated."),
+            "sources":         final_state.get("rag_sources", []),
+            "intent":          final_state.get("intent", "unknown"),
             "web_search_used": final_state.get("web_search_used", False),
+            "route_data":      final_state.get("route_data"),
         }
     except Exception as exc:
         logger.error("Graph execution failed for thread '%s': %s", thread_id, exc)

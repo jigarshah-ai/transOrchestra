@@ -3,7 +3,7 @@
 import logging
 import os
 import time
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -33,6 +33,7 @@ class QueryResponse(BaseModel):
     intent: str
     web_search_used: bool
     latency_ms: int
+    route_data: Optional[Dict[str, Any]] = None
 
 
 class IngestRequest(BaseModel):
@@ -68,6 +69,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             intent=result["intent"],
             web_search_used=result["web_search_used"],
             latency_ms=latency_ms,
+            route_data=result.get("route_data"),
         )
     except Exception as exc:
         logger.error("/query endpoint error: %s", exc)

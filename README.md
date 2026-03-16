@@ -90,6 +90,8 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Hybrid Retrieval | EnsembleRetriever (BM25 0.4 + Vector 0.6) | langchain 0.2.16 |
 | Reranker | Cohere rerank-english-v3.0 | langchain-cohere 0.2.4 |
 | Web Search Fallback | Tavily API | tavily-python 0.3.9 |
+| Route Maps | Google Maps API + Folium | googlemaps 4.10.0 / folium 0.17.0 |
+| Map rendering (Streamlit) | streamlit-folium | 0.22.0 |
 | RAG Framework | LangChain | 0.2.16 |
 | Observability & Tracing | LangSmith | ≥ 0.1.112 |
 | Evaluation | Ragas (Faithfulness + Answer Relevancy) | 0.1.21 |
@@ -112,6 +114,7 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Corrective RAG with web search fallback | ✅ | Tavily triggered when relevance score < threshold |
 | Ragas evaluation | ✅ | `eval/run_ragas.py` — Faithfulness + Answer Relevancy |
 | Observability & production tracing | ✅ | LangSmith — full trace of every LLM call, retriever, and agent hop |
+| Live route maps with compliance overlays | ✅ | Google Maps API + Folium + per-state HazMat compliance alerts |
 
 ---
 
@@ -162,6 +165,7 @@ copy .env.example .env
 OPENAI_API_KEY=sk-...            # Required
 COHERE_API_KEY=...               # Optional (free at dashboard.cohere.com)
 TAVILY_API_KEY=tvly-...          # Optional (free at app.tavily.com)
+GOOGLE_MAPS_API_KEY=AIza...      # Optional (enables live routing — mock map works without it)
 CHROMA_PERSIST_DIR=./chroma_db
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 LLM_MODEL=gpt-4o-mini
@@ -292,8 +296,97 @@ The Dispatcher node classifies every query into one of four intents, then routes
 |---|---|---|
 | `safety_query` | HazMat rules, placards, DOT compliance | Safety Agent → RAG |
 | `maintenance_query` | Brake specs, inspection requirements, DVIRs | Safety Agent → RAG |
-| `route_query` | "Route from X to Y", distance, ETA | Navigator Agent |
+| `route_query` | "Route from X to Y", distance, ETA | Navigator Agent → Google Maps |
 | `general` | Anything else | Safety Agent → RAG (fallback) |
+
+---
+
+## Navigator Agent — Google Maps Integration
+
+The Navigator Agent provides **live driving routes with per-state HazMat compliance overlays** using the Google Maps Directions API. When no API key is configured it falls back seamlessly to a realistic mock route (Chicago → Detroit on I-94) so the map always renders.
+
+### How a route query is processed
+
+```
+User: "Route from Chicago IL to Detroit MI"
+          │
+          ▼
+  Dispatcher → intent: "route_query"
+          │
+          ▼
+  Navigator Agent
+  ├── location_extractor.py
+  │     LLM extracts: origin="Chicago, IL" destination="Detroit, MI"
+  │
+  ├── maps_tool.get_route(origin, destination)
+  │     ├── Google Maps Directions API (if GOOGLE_MAPS_API_KEY set)
+  │     │     → polyline coords, distance, duration_in_traffic
+  │     └── Mock I-94 route (if no API key)
+  │           → 281.4 mi, 4h 35 mins, polyline coords
+  │
+  ├── _detect_states(polyline_coords)
+  │     → ["IL", "IN", "MI"]
+  │
+  └── _build_compliance_notes(["IL", "IN", "MI"])
+        → HazMat rules per state (permit requirements, tunnel restrictions, etc.)
+          │
+          ▼
+  AgentState.route_data → FastAPI → Streamlit
+          │
+          ▼
+  render_route_map() → folium map rendered in chat
+```
+
+### Live screenshot — Chicago to Detroit
+
+The screenshot below shows a confirmed working route query in the TransOrchestra UI:
+
+> **Query:** *"Route from Chicago IL to Detroit MI"*
+
+The response includes:
+- Route summary table (distance, drive time, traffic-adjusted ETA, states crossed)
+- HazMat compliance alerts for Illinois *(permit required)*, Indiana, and Michigan *(permit required)*
+- An interactive folium map with the blue I-94 polyline, green origin marker, red destination marker, and orange state compliance markers
+
+*[See screenshot: TransOrchestra route map — Chicago to Detroit with HazMat compliance overlay]*
+
+### What the folium map shows
+
+| Map element | Colour | Meaning |
+|---|---|---|
+| Route polyline | Blue | Driving path from Google Maps (or mock I-94) |
+| Origin marker | Green | Starting city |
+| Destination marker | Red | Ending city |
+| State compliance marker | Orange | Per-state HazMat rule — click to expand detail |
+
+### Google Maps API setup
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Enable **Directions API**
+3. Create an API key and add to `.env`:
+   ```env
+   GOOGLE_MAPS_API_KEY=AIza...
+   ```
+4. Restart Uvicorn — the `*(mock data)*` badge disappears and live traffic data is used
+
+> **Without the API key** the mock route always works. The map renders with the full I-94 polyline and all three state compliance markers. Only the real-time traffic estimate is missing.
+
+### Supported HazMat state rules (built-in)
+
+27 US states are covered with bounding-box detection. States with explicit permit rules:
+
+| State | Rule summary | Permit required |
+|---|---|---|
+| Illinois | IDOT carrier registration + Chicago tunnel restrictions | Yes |
+| Michigan | DNR permit for Class 1 explosives + Ambassador Bridge | Yes |
+| Texas | TxDOT permit for >80,000 lb or specific HazMat classes | Yes |
+| California | CARB emissions + CHP permit for explosives | Yes |
+| New York | NYPD permit for NYC boroughs + tunnel restrictions | Yes |
+| Florida | FHSMV intrastate permit + Skyway Bridge wind rules | Yes |
+| Indiana | Federal 49 CFR only — no additional state permit | No |
+| Ohio | Tier II pre-notification to OEPA | No |
+| Pennsylvania | I-81 corridor required for Class 1 (not PA Turnpike) | No |
+| Georgia | GDOT registration + Atlanta peak-hour restrictions | No |
 
 ---
 
@@ -383,13 +476,18 @@ transOrchestra/
 │   │   ├── retriever.py            # Vector, BM25, hybrid, reranking builders
 │   │   └── pipeline.py             # RAG chain (LCEL) + corrective search
 │   │
-│   └── agents/                     # LangGraph multi-agent system
+│   ├── agents/                     # LangGraph multi-agent system
+│   │   ├── __init__.py
+│   │   ├── state.py                # AgentState TypedDict (incl. route_data)
+│   │   ├── graph.py                # Graph compilation + run_graph()
+│   │   ├── dispatcher.py           # Intent classification node
+│   │   ├── safety_agent.py         # FMCSA/DOT RAG node + Tavily fallback
+│   │   └── navigator_agent.py      # Google Maps routing + HazMat compliance
+│   │
+│   └── tools/                      # Reusable tool modules
 │       ├── __init__.py
-│       ├── state.py                # AgentState TypedDict
-│       ├── graph.py                # Graph compilation + run_graph()
-│       ├── dispatcher.py           # Intent classification node
-│       ├── safety_agent.py         # FMCSA/DOT RAG node + Tavily fallback
-│       └── navigator_agent.py      # Route analysis node
+│       ├── location_extractor.py   # LLM-powered city/state extractor
+│       └── maps_tool.py            # Google Maps API + mock fallback + state rules
 │
 ├── frontend/
 │   └── app.py                      # Streamlit Control Tower UI
@@ -445,15 +543,16 @@ tests/test_retriever.py::TestBuildRerankingRetriever::test_falls_back_without_co
 
 ## Sample Queries
 
-| Type | Query | Expected Intent |
-|---|---|---|
-| Safety | "Can a driver transport HazMat without a CDL endorsement?" | `safety_query` |
-| Safety | "What does placard 1203 indicate on a tanker?" | `safety_query` |
-| Safety | "How many hours can a driver operate before mandatory rest?" | `safety_query` |
-| Inspection | "What is required under Section 396.11 DVIR?" | `safety_query` |
-| Brakes | "What is the minimum brake lining thickness before replacement?" | `maintenance_query` |
-| Route | "Route from Chicago, IL to Detroit, MI" | `route_query` |
-| Route | "How far is Dallas to Houston?" | `route_query` |
+| Type | Query | Expected Intent | Map rendered? |
+|---|---|---|---|
+| Safety | "Can a driver transport HazMat without a CDL endorsement?" | `safety_query` | No |
+| Safety | "What does placard 1203 indicate on a tanker?" | `safety_query` | No |
+| Safety | "How many hours can a driver operate before mandatory rest?" | `safety_query` | No |
+| Inspection | "What is required under Section 396.11 DVIR?" | `safety_query` | No |
+| Brakes | "What is the minimum brake lining thickness before replacement?" | `maintenance_query` | No |
+| Route | "Route from Chicago, IL to Detroit, MI" | `route_query` | **Yes** |
+| Route | "How long to drive from Houston TX to Dallas TX?" | `route_query` | **Yes** |
+| Route | "What is the best route from New York to Boston?" | `route_query` | **Yes** |
 
 ---
 
@@ -525,7 +624,8 @@ No API calls are made and no data is sent when tracing is off.
 
 | Limitation | Detail | Planned Fix |
 |---|---|---|
-| Navigator Agent is a stub | Returns simulated route data | Google Maps / HERE Maps API integration in v2.0 |
+| Google Maps key optional | Without `GOOGLE_MAPS_API_KEY` the navigator uses a mock I-94 route — map still renders | Add key to `.env` for live routing + real-time traffic |
+| State detection uses bounding boxes | 27 US states covered; precise state borders use simple lat/lng boxes | Replace with Google Maps reverse geocoding in v2.0 |
 | ChromaDB telemetry errors | `capture() takes 1 positional argument` — harmless posthog bug in v0.5.18 | Resolved in chromadb ≥ 0.5.20 |
 | Small corpus warning | `n_results` adjusted when fewer than 10 chunks exist | Ingest more PDFs |
 | Cohere key required for reranking | Falls back to hybrid automatically | No action needed |

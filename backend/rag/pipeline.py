@@ -118,6 +118,70 @@ def run_query_with_docs(chain, retriever: BaseRetriever, query: str) -> dict:
         raise
 
 
+def run_query_with_web_context(
+    retriever: BaseRetriever,
+    query: str,
+    web_docs: List[Document],
+) -> dict:
+    """Execute *query* combining ChromaDB results with *web_docs* as extra context.
+
+    Web documents are injected directly into the context slot — they are never
+    used as input to the retriever, which solves the corrective-RAG bug where
+    Tavily content was previously prepended to the query string and lost.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=LLM_MODEL,
+            temperature=0,
+            streaming=False,
+            openai_api_key=OPENAI_API_KEY,
+        )
+
+        # Retrieve ChromaDB docs using the clean original query.
+        try:
+            chroma_docs: List[Document] = retriever.invoke(query)
+        except Exception:
+            chroma_docs = []
+
+        # Web docs first so GPT sees them as priority context.
+        all_docs = web_docs + chroma_docs
+        context = _format_docs(all_docs)
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", SYSTEM_PROMPT),
+                ("human", "Context documents:\n\n{context}\n\nQuestion: {question}"),
+            ]
+        )
+        messages = prompt.format_messages(context=context, question=query)
+        response = llm.invoke(messages)
+        answer = response.content if hasattr(response, "content") else str(response)
+
+        seen: set = set()
+        sources = []
+        for doc in all_docs:
+            key = (doc.metadata.get("source", ""), doc.metadata.get("page", 0))
+            if key not in seen:
+                seen.add(key)
+                sources.append({"filename": key[0], "page": key[1]})
+
+        logger.info(
+            "Web-context RAG: %d web doc(s) + %d ChromaDB doc(s) → answer generated.",
+            len(web_docs),
+            len(chroma_docs),
+        )
+        return {
+            "answer": answer,
+            "sources": sources,
+            "num_docs_retrieved": len(all_docs),
+        }
+    except Exception as exc:
+        logger.error("RAG query with web context failed: %s", exc)
+        raise
+
+
 def check_relevance_score(retriever: BaseRetriever, query: str) -> float:
     """Retrieve docs for *query* and return the mean similarity score.
 

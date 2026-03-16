@@ -9,13 +9,16 @@
 1. [Configuration Reference](#1-configuration-reference)
 2. [Module Reference — RAG Pipeline](#2-module-reference--rag-pipeline)
 3. [Module Reference — Agents](#3-module-reference--agents)
-4. [Module Reference — API](#4-module-reference--api)
-5. [LangGraph State & Flow](#5-langgraph-state--flow)
-6. [Embedding Model Comparison](#6-embedding-model-comparison)
-7. [Retrieval Strategy Deep-Dive](#7-retrieval-strategy-deep-dive)
-8. [Corrective RAG Flow](#8-corrective-rag-flow)
-9. [Evaluation Framework](#9-evaluation-framework)
-10. [Troubleshooting](#10-troubleshooting)
+4. [Module Reference — Tools](#4-module-reference--tools)
+5. [Module Reference — API](#5-module-reference--api)
+6. [LangGraph State & Flow](#6-langgraph-state--flow)
+7. [Embedding Model Comparison](#7-embedding-model-comparison)
+8. [Retrieval Strategy Deep-Dive](#8-retrieval-strategy-deep-dive)
+9. [Corrective RAG Flow](#9-corrective-rag-flow)
+10. [Navigator Agent — Google Maps Flow](#10-navigator-agent--google-maps-flow)
+11. [Observability & Monitoring — LangSmith](#11-observability--monitoring--langsmith)
+12. [Evaluation Framework](#12-evaluation-framework)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -36,6 +39,11 @@ All configuration is loaded from `.env` via `backend/config.py`. No values are h
 | `TOP_K_RETRIEVAL` | `10` | — | Number of documents fetched by vector/BM25 retriever |
 | `TOP_K_RERANK` | `3` | — | Number of documents after Cohere reranking |
 | `RELEVANCE_SCORE_THRESHOLD` | `0.6` | — | Minimum avg score before Tavily fallback triggers |
+| `GOOGLE_MAPS_API_KEY` | — | ❌ Optional | Google Maps Directions API key. Mock route used if missing |
+| `LANGCHAIN_TRACING_V2` | `false` | ❌ Optional | Set `true` to enable LangSmith tracing |
+| `LANGCHAIN_API_KEY` | — | ❌ Optional | LangSmith API key (free at smith.langchain.com) |
+| `LANGCHAIN_PROJECT` | `transOrchestra` | — | LangSmith project name for trace grouping |
+| `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | — | LangSmith ingest endpoint |
 
 ---
 
@@ -167,6 +175,7 @@ class AgentState(TypedDict):
     web_search_used: bool                     # Tavily was triggered
     final_answer: str                         # final response to user
     thread_id: str                            # MemorySaver thread key
+    route_data: Optional[dict]               # navigator_agent route + polyline; None for all other intents
 ```
 
 ---
@@ -216,14 +225,22 @@ Handles 3 failure modes gracefully:
 
 **`navigator_agent_node(state: AgentState) → AgentState`**
 
-Currently a stub returning realistic simulated data. Includes:
-- City pair extraction via regex
-- Pre-loaded route lookup table (8 common US city pairs)
-- HOS compliance note for multi-state routes
-- HazMat placard reminder per 49 CFR 172.504
-- Clear disclaimer that data is simulated
+Live Google Maps routing node. Execution flow:
 
-**Planned v2.0**: Google Maps Distance Matrix API or HERE Routing API integration.
+```
+1. extract_locations(query)          ← LLM extracts origin + destination
+2. get_route(origin, destination)    ← Google Maps or mock fallback
+3. Build markdown answer table       ← distance, time, traffic ETA, states
+4. Build compliance_section          ← per-state HazMat rules and permit flags
+5. Set state["route_data"]           ← Streamlit reads this to render folium map
+```
+
+Returns `route_data=None` if location extraction fails (polite error message returned instead).
+
+Sets three state fields:
+- `state["final_answer"]` — markdown route table + compliance alerts
+- `state["route_data"]` — full route dict for Streamlit map rendering
+- `state["rag_sources"]` — always `[]` (routes do not use the vector store)
 
 ---
 
@@ -260,7 +277,97 @@ Routing function `route_after_dispatch`:
 
 ---
 
-## 4. Module Reference — API
+## 4. Module Reference — Tools
+
+### `backend/tools/location_extractor.py`
+
+**`extract_locations(query: str) → dict`**
+
+Uses `ChatOpenAI` (GPT-4o-mini, temperature=0) to parse natural language route queries into structured origin/destination pairs.
+
+Prompt strategy:
+- Instructs the model to return **only valid JSON** with no markdown fences
+- Strips markdown fences defensively if the model adds them anyway
+- Validates required keys before returning
+
+Return shape:
+```python
+{
+    "origin":      "Chicago, IL",
+    "destination": "Detroit, MI",
+    "found":       True,
+    "confidence":  "high"  # or "low"
+}
+```
+
+Handles varied phrasings:
+- `"route from Chicago to Detroit"`
+- `"how long to drive from Houston TX to Dallas"`
+- `"I need to get to Miami from NYC"`
+
+Falls back to `found=False` on JSON parse errors or LLM failures — the navigator node handles this gracefully.
+
+---
+
+### `backend/tools/maps_tool.py`
+
+**`get_route(origin: str, destination: str) → dict`**
+
+Main routing function. Tries the Google Maps Directions API first; falls back to mock data if key is missing or API call fails.
+
+Return shape:
+```python
+{
+    "success":             True,
+    "origin":              "Chicago, IL, USA",        # formatted address from Maps
+    "destination":         "Detroit, MI, USA",
+    "distance_miles":      281.4,
+    "distance_text":       "281 miles",
+    "duration_text":       "4 hours 12 mins",
+    "duration_in_traffic": "4 hours 35 mins (with current traffic)",
+    "polyline_coords":     [[41.87, -87.62], ...],   # list of [lat, lng]
+    "start_location":      {"lat": 41.8781, "lng": -87.6298},
+    "end_location":        {"lat": 42.3314, "lng": -83.0458},
+    "states_crossed":      ["IL", "IN", "MI"],
+    "compliance_notes":    [...],                     # see below
+    "steps_count":         12,
+    "mock_data":           False                      # True when using fallback
+}
+```
+
+**`_detect_states(coords) → List[str]`**
+
+Samples polyline coordinates every 8th point and checks each against 27 US state bounding boxes. Returns ordered list of state abbreviations along the route.
+
+**`_build_compliance_notes(states) → List[dict]`**
+
+For each state code that has an entry in `HAZMAT_RULES`, returns a compliance note dict:
+```python
+{
+    "state_code":      "IL",
+    "state":           "Illinois",
+    "summary":         "Illinois requires IDOT HazMat carrier registration.",
+    "detail":          "Tunnel and route restrictions apply on I-90/94...",
+    "permit_required": True,
+    "center":          [40.0, -89.2]   # map marker location
+}
+```
+
+**`_build_mock_route(origin, destination) → dict`**
+
+Returns a hardcoded Chicago → Detroit route along I-94 with 9 real coordinate points. Always produces a valid, renderable map. States covered: IL, IN, MI.
+
+**Data coverage:**
+
+| Dataset | Coverage |
+|---|---|
+| State bounding boxes | 27 US states |
+| HazMat rule database | 10 states (IL, IN, MI, OH, TX, CA, NY, PA, FL, GA) |
+| State center coordinates | 27 US states (for map markers) |
+
+---
+
+## 5. Module Reference — API
 
 ### `backend/api/routes.py`
 
@@ -301,7 +408,7 @@ This restricts the API to the local Streamlit frontend in development. For produ
 
 ---
 
-## 5. LangGraph State & Flow
+## 6. LangGraph State & Flow
 
 ### Thread-level Memory
 
@@ -324,7 +431,7 @@ This ensures no node accidentally clears fields set by a previous node.
 
 ---
 
-## 6. Embedding Model Comparison
+## 7. Embedding Model Comparison
 
 ### BGE-small-en-v1.5 (default)
 
@@ -370,7 +477,7 @@ print("OpenAI top-3:", results["openai"])
 
 ---
 
-## 7. Retrieval Strategy Deep-Dive
+## 8. Retrieval Strategy Deep-Dive
 
 ### Why Hybrid Retrieval?
 
@@ -394,7 +501,7 @@ Cohere's cross-encoder model (`rerank-english-v3.0`) reads the full query and ea
 
 ---
 
-## 8. Corrective RAG Flow
+## 9. Corrective RAG Flow
 
 ```
 Query arrives
@@ -402,7 +509,10 @@ Query arrives
     ▼
 check_relevance_score(retriever, query)
     │
-    ├── score >= 0.6 ──────────────────────► Run RAG chain directly
+    ├── score >= 0.6 ──────────────────────► run_query_with_docs(chain, retriever, query)
+    │                                              │
+    │                                              ▼
+    │                                         Answer + sources returned
     │
     └── score < 0.6 AND TAVILY_API_KEY set
         │
@@ -410,33 +520,289 @@ check_relevance_score(retriever, query)
     TavilyClient.search(query, max_results=3)
         │
         ▼
-    Prepend web results as:
-    [WEB SOURCE] {title}
-    {content}
-    URL: {url}
-    
-    Original question: {query}
+    Each result → Document(
+        page_content = result["content"],
+        metadata = {
+            "source": "[WEB] {title}",
+            "page":   result["url"]
+        }
+    )
         │
         ▼
-    Run RAG chain with enriched query
+    run_query_with_web_context(retriever, query, web_docs)
+        ├── retriever.invoke(query)   ← clean query, gets local ChromaDB docs
+        ├── all_docs = web_docs + chroma_docs
+        ├── context = _format_docs(all_docs)  ← web docs appear first in context
+        └── llm.invoke(prompt(context, question))
+        │
+        ▼
+    Answer grounded in web + local context
+    Sources include [WEB] entries alongside PDF citations
         │
         ▼
     Set web_search_used = True in state
 ```
 
+**Key design principle:** Tavily results are converted to `Document` objects and injected directly into the LLM `context` slot. The original query string is never modified. This ensures the retriever always searches ChromaDB with the clean user question, and the LLM sees both web and local evidence as properly attributed context chunks.
+
 The relevance threshold (default 0.6) is configurable via `RELEVANCE_SCORE_THRESHOLD`. Lower values mean web search triggers more often; higher values mean the system relies more on indexed documents.
 
 ---
 
-## 9. Evaluation Framework
+## 10. Navigator Agent — Google Maps Flow
 
-### Ragas Metrics Explained
+### End-to-end flow
+
+```
+POST /api/v1/query  {"query": "Route from Chicago IL to Detroit MI"}
+    │
+    ▼
+LangGraph dispatcher_node
+    ChatOpenAI classifies → intent = "route_query"
+    │
+    ▼
+navigator_agent_node
+    │
+    ├─ extract_locations("Route from Chicago IL to Detroit MI")
+    │       ChatOpenAI → {"origin": "Chicago, IL",
+    │                      "destination": "Detroit, MI",
+    │                      "found": true, "confidence": "high"}
+    │
+    ├─ get_route("Chicago, IL", "Detroit, MI")
+    │       ├── GOOGLE_MAPS_API_KEY set?
+    │       │     YES → client.directions(origin, destination, mode="driving",
+    │       │                             departure_time=now(), units="imperial")
+    │       │           → decode polyline → 9-400 [lat,lng] coords
+    │       │     NO  → _build_mock_route() → 9 hardcoded I-94 coords
+    │       │
+    │       ├── _detect_states(coords)
+    │       │     samples every 8th coord → checks 27 state bounding boxes
+    │       │     → ["IL", "IN", "MI"]
+    │       │
+    │       └── _build_compliance_notes(["IL","IN","MI"])
+    │             → 3 compliance dicts (IL: permit_required=True,
+    │                                   IN: permit_required=False,
+    │                                   MI: permit_required=True)
+    │
+    ├─ Build markdown answer
+    │     Route table + HazMat alerts + 49 CFR reminders
+    │
+    └─ Return AgentState with:
+          final_answer = markdown string
+          route_data   = full route dict (polyline, states, compliance, etc.)
+    │
+    ▼
+FastAPI QueryResponse
+    answer    = markdown
+    route_data = full dict (polyline_coords, compliance_notes, etc.)
+    intent    = "route_query"
+    │
+    ▼
+Streamlit frontend/app.py
+    st.markdown(answer)          ← renders route table + compliance text
+    render_route_map(route_data) ← renders folium map
+        ├── folium.Map(CartoDB positron tiles)
+        ├── PolyLine(coords, color="#185FA5")      ← blue route line
+        ├── Marker(start, icon=green play)         ← origin
+        ├── Marker(end,   icon=red flag)           ← destination
+        └── Marker(state_center, icon=orange !)   ← per compliance note
+    st_folium(m, height=420)     ← renders in Streamlit
+    st.warning("Permit required in: Illinois, Michigan")
+```
+
+### AgentState fields used by Navigator
+
+| Field | Set by | Read by |
+|---|---|---|
+| `query` | `graph.py` initial state | `navigator_agent_node` |
+| `intent` | `dispatcher_node` | `route_after_dispatch` routing |
+| `final_answer` | `navigator_agent_node` | FastAPI → Streamlit chat bubble |
+| `route_data` | `navigator_agent_node` | FastAPI → Streamlit `render_route_map()` |
+| `rag_sources` | Set to `[]` by navigator | Source expander (empty for route queries) |
+| `web_search_used` | Set to `False` by navigator | Web search badge (hidden for routes) |
+
+### route_data schema
+
+```python
+{
+    # Identity
+    "success":             bool,
+    "mock_data":           bool,          # True = no API key / API error
+
+    # Addresses
+    "origin":              str,           # formatted by Google Maps
+    "destination":         str,
+
+    # Distances and times
+    "distance_miles":      float,
+    "distance_text":       str,           # "281 miles"
+    "duration_text":       str,           # "4 hours 12 mins"
+    "duration_in_traffic": str,           # traffic-aware, or same as above
+
+    # Map rendering
+    "polyline_coords":     List[List[float]],  # [[lat, lng], ...]
+    "start_location":      {"lat": float, "lng": float},
+    "end_location":        {"lat": float, "lng": float},
+
+    # Compliance
+    "states_crossed":      List[str],     # ["IL", "IN", "MI"]
+    "compliance_notes": [
+        {
+            "state_code":      str,
+            "state":           str,       # full name
+            "summary":         str,
+            "detail":          str,
+            "permit_required": bool,
+            "center":          [float, float]  # [lat, lng] for map marker
+        }
+    ],
+    "steps_count":         int,
+}
+```
+
+### Folium map layers
+
+| Layer | folium object | Colour | Condition |
+|---|---|---|---|
+| Route line | `PolyLine` | `#185FA5` (blue) | Always |
+| Origin | `Marker` | green (`fa:play`) | Always |
+| Destination | `Marker` | red (`fa:flag`) | Always |
+| State compliance | `Marker` | orange (`glyphicon:warning-sign`) | One per `compliance_notes` entry |
+| Bounds | `fit_bounds` | — | Always — auto-zooms to route |
+
+---
+
+## 11. Observability & Monitoring — LangSmith
+
+### Overview
+
+TransOrchestra integrates **LangSmith** for full-stack observability of the multi-agent RAG pipeline. LangChain's built-in callback system auto-instruments every LLM call, retriever invocation, and agent node transition — no decorators or manual logging required in individual modules.
+
+LangSmith is configured in a single place (`backend/config.py`) and activated via four environment variables in `.env`.
+
+---
+
+### How It Works — Implementation Detail
+
+`backend/config.py` is imported as the **first project module** in `backend/main.py`. It calls `load_dotenv()` and immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
+
+```python
+# backend/config.py  (runs before any langchain import)
+load_dotenv()
+
+os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
+os.environ["LANGCHAIN_API_KEY"]    = os.getenv("LANGCHAIN_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
+os.environ["LANGCHAIN_ENDPOINT"]   = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+```
+
+When `LANGCHAIN_TRACING_V2=true`, LangChain's `LangSmithCallbackHandler` is registered globally and every `chain.invoke()`, `retriever.invoke()`, and `llm.invoke()` call in the codebase is traced automatically.
+
+---
+
+### Trace Structure
+
+A single query from the Streamlit UI produces a trace tree with the following shape:
+
+```
+LangGraph  (root span — full query latency)
+│
+├── dispatcher                        ~1.0 s
+│   └── ChatOpenAI / gpt-4o-mini      ~0.5 s, ~55 tokens
+│       Input:  classification prompt + user query
+│       Output: "safety_query" | "route_query" | ...
+│
+├── route_after_dispatch              ~0.0 s  (routing decision, no LLM call)
+│
+└── safety_agent                      ~5.1 s, ~1.4K tokens
+    │
+    ├── Retriever                     ~0.03 s  (hybrid ensemble)
+    │   ├── BM25Retriever             ~0.00 s
+    │   └── VectorStoreRetriever      ~0.03 s
+    │
+    └── ChatOpenAI / gpt-4o-mini      ~1.35 s, ~1.4K tokens
+        Input:  system prompt + retrieved context + question
+        Output: final answer with source citations
+```
+
+If Tavily web search fires (low relevance score), an additional `TavilySearch` span appears between the Retriever and the final LLM call.
+
+---
+
+### What Each Span Captures
+
+| Span | Inputs recorded | Outputs recorded | Metrics |
+|---|---|---|---|
+| LangGraph root | Full `AgentState` dict | Final state | Total latency |
+| dispatcher | Classification prompt | Raw LLM text + parsed intent | Latency, tokens |
+| route_after_dispatch | intent string | target node name | Latency |
+| safety_agent | query, retriever config | answer, sources, web_search_used | Latency, tokens |
+| Retriever | query string | List of retrieved Document objects | Latency |
+| BM25Retriever | query string | BM25-ranked documents | Latency |
+| VectorStoreRetriever | query embedding | Cosine-similarity ranked docs | Latency |
+| gpt-4o-mini (answer) | Full formatted prompt with context | Answer text | Latency, tokens, cost |
+
+---
+
+### LangSmith Dashboard Features Used
+
+| Feature | How to access | What it shows |
+|---|---|---|
+| **Traces** | Tracing → transOrchestra | Full run list with input preview and latency |
+| **Trace detail** | Click any run | Expandable tree of all spans |
+| **Input / Output** | Right panel tabs | Full prompt and response text per node |
+| **Metadata** | Right panel → Metadata tab | Model name, temperature, thread_id |
+| **Threads** | Threads tab | Conversation history grouped by thread_id |
+| **Runs** | Runs tab | Flat list of all individual LLM calls |
+
+---
+
+### Environment Variables Reference
+
+```env
+# Enable tracing
+LANGCHAIN_TRACING_V2=true
+
+# Your LangSmith API key — free tier available
+# Get it at: https://smith.langchain.com/settings
+LANGCHAIN_API_KEY=lsv2_pt_...
+
+# Project name — traces appear under this name in the UI
+LANGCHAIN_PROJECT=transOrchestra
+
+# API endpoint (default, no need to change)
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+```
+
+### Startup confirmation
+
+When tracing is enabled, the FastAPI startup log outputs:
+```
+INFO  backend.main — LangSmith tracing: ENABLED → project 'transOrchestra'
+```
+
+When disabled:
+```
+INFO  backend.main — LangSmith tracing: disabled (set LANGCHAIN_TRACING_V2=true to enable)
+```
+
+---
+
+### Disabling Tracing
+
+Set `LANGCHAIN_TRACING_V2=false` in `.env`. No data is sent, no API calls are made, and there is zero performance overhead.
+
+---
+
+## 12. Evaluation Framework
+
+### 10.1 Ragas Metrics Explained
 
 **Faithfulness** measures whether every claim in the generated answer can be traced back to the retrieved context chunks. A score of 1.0 means every statement is grounded; 0.0 means the model hallucinated all of it.
 
 **Answer Relevancy** measures whether the answer actually addresses the question asked. A high-faithfulness but low-relevancy answer would be one that is factually grounded but answers a different question.
 
-### Evaluation Pipeline
+### 10.2 Evaluation Pipeline
 
 ```
 eval_set.json (15 Q&A pairs)
@@ -461,7 +827,7 @@ ragas.evaluate(dataset, metrics=[faithfulness, answer_relevancy])
 Print results table + save to eval/results.json
 ```
 
-### Interpreting Results
+### 10.3 Interpreting Results
 
 | Score Range | Interpretation |
 |---|---|
@@ -481,7 +847,7 @@ Typical causes of low answer relevancy:
 
 ---
 
-## 10. Troubleshooting
+## 13. Troubleshooting
 
 ### `chroma-hnswlib` build error on Windows
 
@@ -561,6 +927,46 @@ logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICA
 ### `Number of requested results 10 is greater than number of elements in index 8`
 
 You have fewer than 10 chunks in your vector store. ChromaDB automatically adjusts `n_results` down to the available count — this is informational, not an error. Ingest more PDFs to resolve.
+
+---
+
+### LangSmith traces not appearing
+
+Check in order:
+
+1. **Confirm tracing is enabled** — startup log must say `ENABLED`, not `disabled`
+2. **Check the API key** — go to [smith.langchain.com/settings](https://smith.langchain.com/settings), copy the key exactly, paste into `.env` with no trailing spaces
+3. **Check import order** — `backend/config.py` must be the first project import in `backend/main.py` (before `routes`). The env vars must be set before any `langchain` module is imported.
+4. **Check project name** — in the LangSmith UI, use the **Tracing** → **All projects** view if you don't see `transOrchestra` listed immediately
+5. **Firewall / proxy** — LangSmith sends traces to `https://api.smith.langchain.com`. If your network blocks outbound HTTPS, traces won't arrive. Check with `curl https://api.smith.langchain.com`
+
+If the key is wrong, LangSmith silently drops traces (it doesn't crash the app). Set `LANGCHAIN_TRACING_V2=false` if you want to stop sending data while debugging the key.
+
+---
+
+### Folium map does not appear after a route query
+
+1. Confirm the query was classified as `route_query` — check the **Intent** badge in the chat. If it shows `safety_query`, the dispatcher misclassified it; try phrasing with "Route from … to …".
+2. Check FastAPI logs for `Location extraction failed` — this means the LLM could not parse city names from the query. Include both origin and destination explicitly.
+3. Confirm `streamlit-folium==0.22.0` is installed: `pip show streamlit-folium`.
+4. If the map renders blank (grey tiles), check your internet connection — folium loads CartoDB map tiles from the web.
+
+---
+
+### Google Maps API returns empty directions
+
+Common causes:
+- **Directions API not enabled** — go to [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Enable "Directions API"
+- **Billing not set up** — Google Maps requires a billing account (has a generous free tier)
+- **Key restrictions** — if the key has IP or HTTP referer restrictions, API calls from a server may be blocked. Use an unrestricted key for local development.
+
+The system falls back to mock data automatically on any API failure, so the app continues to work.
+
+---
+
+### LangSmith tracing causes slow queries
+
+LangSmith trace submission is **asynchronous** — it does not block the response path. Queries should not be measurably slower with tracing enabled. If you observe slowness, it is likely unrelated to LangSmith (check OpenAI API latency or Tavily search time in the trace detail view instead).
 
 ---
 

@@ -1,6 +1,6 @@
 """LangGraph state schema for the TransOrchestra multi-agent system."""
 
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Optional
 
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -20,3 +20,4 @@ class AgentState(TypedDict):
     web_search_used: bool
     final_answer: str
     thread_id: str
+    route_data: Optional[Dict[str, Any]]  # populated by navigator_agent; None for all other intents

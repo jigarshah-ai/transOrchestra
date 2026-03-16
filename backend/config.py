@@ -7,12 +7,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── LangSmith tracing ──────────────────────────────────────────────────────────
+# Must be set in os.environ BEFORE any LangChain module is imported so that
+# the LangChain callback machinery picks them up at import time.
+os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
+os.environ["LANGCHAIN_ENDPOINT"] = os.getenv(
+    "LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com"
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Core API keys ──────────────────────────────────────────────────────────────
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 # ── Storage ────────────────────────────────────────────────────────────────────
 CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
@@ -74,6 +85,11 @@ def _warn_missing_optional_keys() -> None:
     if not TAVILY_API_KEY:
         logger.warning(
             "TAVILY_API_KEY is not set. Corrective web search will be disabled."
+        )
+    if not GOOGLE_MAPS_API_KEY:
+        logger.warning(
+            "GOOGLE_MAPS_API_KEY not set in .env — "
+            "Navigator agent will use realistic mock route data."
         )
 
 

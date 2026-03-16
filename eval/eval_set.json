@@ -1,77 +1,77 @@
 [
   {
-    "question": "Can a driver transport hazardous materials without a CDL HazMat endorsement?",
-    "ground_truth": "No. Per 49 CFR 383.93, drivers transporting hazardous materials requiring placards must hold a valid CDL with HazMat endorsement, which requires a TSA security threat assessment.",
+    "question": "Does a commercial truck driver need a HazMat endorsement on their CDL to transport placarded hazardous materials?",
+    "ground_truth": "Yes. Under 49 CFR 383.93, a driver must have a HazMat endorsement on their CDL to transport any quantity of hazardous materials that requires placarding. Obtaining the endorsement requires passing a TSA security threat assessment and a knowledge test.",
     "category": "hazmat"
   },
   {
-    "question": "What does placard 1203 indicate on a tanker truck?",
-    "ground_truth": "Placard 1203 identifies gasoline, a flammable liquid. Per 49 CFR 172.504, any quantity of gasoline transported in bulk requires this placard on all four sides of the vehicle.",
+    "question": "What does DOT placard number 1203 mean on a tanker truck?",
+    "ground_truth": "DOT placard 1203 identifies gasoline, a Class 3 flammable liquid. Per 49 CFR 172.504, any bulk quantity of gasoline must display this placard on all four sides of the transport vehicle.",
     "category": "hazmat"
   },
   {
-    "question": "How far must a HazMat vehicle park from an open fire?",
-    "ground_truth": "Per 49 CFR 397.13, a vehicle carrying hazardous materials must not be parked within 300 feet of an open fire.",
+    "question": "How many feet must a vehicle carrying hazardous materials stay away from an open fire when parked?",
+    "ground_truth": "Under 49 CFR 397.13, a vehicle carrying Division 1.1, 1.2, or 1.3 explosives must not be parked within 300 feet of an open fire.",
     "category": "hazmat"
   },
   {
-    "question": "How many hours can a property-carrying driver drive before a mandatory rest break?",
-    "ground_truth": "Per 49 CFR 395.3, a driver may not drive more than 8 hours without taking at least a 30-minute break.",
+    "question": "How many consecutive hours can a property-carrying truck driver drive before they must take a 30-minute rest break?",
+    "ground_truth": "Per 49 CFR 395.3(a)(3)(ii), a property-carrying driver may not drive more than 8 cumulative hours without at least a 30-minute break. The break must be spent off-duty or in the sleeper berth.",
     "category": "hours_of_service"
   },
   {
-    "question": "What is the 11-hour driving limit for commercial drivers?",
-    "ground_truth": "Under 49 CFR 395.3, a property-carrying driver may drive a maximum of 11 hours after 10 consecutive hours off duty.",
+    "question": "What is the maximum number of driving hours allowed for a property-carrying commercial driver in a single shift under FMCSA Hours of Service rules?",
+    "ground_truth": "Under 49 CFR 395.3, a property-carrying driver may drive a maximum of 11 hours after 10 consecutive hours off duty. This is known as the 11-hour driving limit.",
     "category": "hours_of_service"
   },
   {
-    "question": "Can a driver restart their 60/70-hour clock after 34 consecutive hours off?",
-    "ground_truth": "Yes. Per 49 CFR 395.3(c), a driver may restart a 7/8 consecutive day period after taking 34 or more consecutive hours off duty, including two periods from 1am to 5am.",
+    "question": "Can a truck driver reset their weekly hours by taking 34 consecutive hours off duty?",
+    "ground_truth": "Yes. Per 49 CFR 395.3(c), a driver may restart their 60/70-hour weekly clock by taking at least 34 consecutive hours off duty. The restart must include two off-duty periods from 1:00 a.m. to 5:00 a.m.",
     "category": "hours_of_service"
   },
   {
-    "question": "What is required under Section 396.11 driver vehicle inspection report?",
-    "ground_truth": "Per 49 CFR 396.11, drivers must complete a written DVIR at the end of each driving day reporting any defects or deficiencies that could affect safe operation or cause a breakdown.",
+    "question": "What must a commercial truck driver document in a Driver Vehicle Inspection Report (DVIR) under FMCSA regulations?",
+    "ground_truth": "Under 49 CFR 396.11, drivers must prepare a written DVIR at the end of each driving day listing any defects or deficiencies in the vehicle that could affect safe operation or cause a breakdown. The carrier must repair noted defects before the next trip.",
     "category": "vehicle_inspection"
   },
   {
-    "question": "How often must a commercial motor vehicle receive a periodic inspection?",
-    "ground_truth": "Per 49 CFR 396.17, every commercial motor vehicle must be systematically inspected, repaired, and maintained at least once every 12 months.",
+    "question": "How often does FMCSA require a commercial motor vehicle to undergo a periodic safety inspection?",
+    "ground_truth": "Per 49 CFR 396.17, every commercial motor vehicle must be systematically inspected, repaired, and maintained at least once every 12 months (annual inspection).",
     "category": "vehicle_inspection"
   },
   {
-    "question": "Who can perform the annual inspection on a commercial motor vehicle?",
-    "ground_truth": "Per 49 CFR 396.19, annual inspections must be performed by qualified inspectors who have passed a state or federal training program or can demonstrate equivalent knowledge and skills.",
+    "question": "What qualifications must an inspector have to perform an annual FMCSA inspection on a commercial truck?",
+    "ground_truth": "Under 49 CFR 396.19, annual vehicle inspections must be performed by a qualified inspector who has passed a state or federal training program, or who can demonstrate equivalent training and experience. The carrier must maintain records of inspector qualifications.",
     "category": "vehicle_inspection"
   },
   {
-    "question": "What is the minimum brake lining thickness allowed before replacement?",
-    "ground_truth": "Per FMCSA regulations under 49 CFR 393.47, brake lining and pads must be replaced when thickness is less than 1/4 inch on steering axles and 1/8 inch on non-steering axles.",
+    "question": "What is the minimum allowable brake lining thickness on a commercial truck before the brakes must be replaced?",
+    "ground_truth": "Per 49 CFR 393.47, brake linings must be replaced when thickness is less than 1/4 inch on steering axles and less than 1/8 inch on other axles for drum brakes. Disc brake pads must be replaced before the friction material contacts the rotor.",
     "category": "brakes"
   },
   {
-    "question": "How quickly must air brakes build pressure from 85 to 100 psi?",
-    "ground_truth": "Per 49 CFR 393.55, air brakes must build air pressure from 85 to 100 psi within 45 seconds with the engine running at maximum governed RPM.",
+    "question": "How fast must air brakes build pressure from 85 to 100 psi on a commercial motor vehicle?",
+    "ground_truth": "Per 49 CFR 393.55, the air brake system must build pressure from 85 to 100 psi within 45 seconds with the engine running at the manufacturer's maximum governed RPM.",
     "category": "brakes"
   },
   {
-    "question": "What is the maximum push rod stroke for a type 30 brake chamber?",
-    "ground_truth": "Per FMCSA brake adjustment limits, a type 30 brake chamber has a maximum stroke limit of 2.5 inches before the brakes are considered out of adjustment.",
+    "question": "What is the maximum allowable brake chamber push rod stroke for a Type 30 brake chamber before the brake is considered out of adjustment?",
+    "ground_truth": "According to FMCSA brake adjustment limits under Appendix G to Subchapter B, a Type 30 brake chamber has a maximum stroke limit of 2.5 inches. If the stroke exceeds this, the brakes are out of adjustment and the vehicle must be placed out of service.",
     "category": "brakes"
   },
   {
-    "question": "How many tie-downs are required for cargo between 5 and 10 feet long?",
-    "ground_truth": "Per 49 CFR 393.102, cargo between 5 and 10 feet in length requires a minimum of 2 tie-downs regardless of weight.",
+    "question": "How many tie-down straps are required to secure cargo that is between 5 feet and 10 feet long on a flatbed truck?",
+    "ground_truth": "Per 49 CFR 393.102, cargo that is between 5 and 10 feet in length requires a minimum of 2 tie-downs, regardless of the cargo's weight.",
     "category": "load_securement"
   },
   {
-    "question": "What is the minimum working load limit for cargo securement devices?",
-    "ground_truth": "Per 49 CFR 393.102, the aggregate working load limit of all tie-downs must be at least 50% of the weight of the cargo being secured.",
+    "question": "What is the aggregate working load limit required for tie-downs securing cargo on a commercial vehicle?",
+    "ground_truth": "Under 49 CFR 393.102, the total (aggregate) working load limit of all cargo securement devices used must be at least 50% of the weight of the cargo article being secured.",
     "category": "load_securement"
   },
   {
-    "question": "Can tarps alone be used as cargo securement for loose bulk materials?",
-    "ground_truth": "No. Per 49 CFR 393.118, vehicles transporting loose materials must use a tarp or other cover to prevent spillage, but this is in addition to required tie-downs, not a substitute for them.",
+    "question": "Is a tarp or cover sufficient on its own to secure loose bulk material on a commercial truck under FMCSA rules?",
+    "ground_truth": "No. Under 49 CFR 393.118, vehicles transporting loose materials like gravel or sand must use a tarp or cover to prevent spillage, but the tarp is not a substitute for required tie-down securement devices. Both are required.",
     "category": "load_securement"
   }
 ]

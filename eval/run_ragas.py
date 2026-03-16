@@ -6,11 +6,13 @@ import sys
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # Suppress noisy deprecation warnings from third-party libraries during eval.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+
+_NO_ANSWER_SENTINEL = "I don't have enough information in my documents to answer this reliably."
 
 # Ensure project root is on the path.
 project_root = Path(__file__).resolve().parent.parent
@@ -75,21 +77,56 @@ def build_vector_only_pipeline() -> Tuple:
     return retriever, chain, None, None
 
 
+def _run_tavily_fallback(question: str) -> Optional[List]:
+    """Run a Tavily web search and return results as Document objects, or None on failure."""
+    try:
+        from langchain_core.documents import Document
+
+        project_root = Path(__file__).resolve().parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+
+        from backend.config import TAVILY_API_KEY
+        if not TAVILY_API_KEY:
+            return None
+
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        results = client.search(query=question, max_results=3)
+        docs = []
+        for r in results.get("results", []):
+            docs.append(Document(
+                page_content=r.get("content", ""),
+                metadata={"source": f"[WEB] {r.get('title', 'Web')}", "page": r.get("url", "")},
+            ))
+        return docs if docs else None
+    except Exception as exc:
+        print(f"\n    [Tavily fallback failed: {exc}]", end=" ")
+        return None
+
+
 def _run_one_query(chain, retriever, question: str,
                    fallback_chain=None, fallback_retriever=None):
-    """Run a single question, falling back to hybrid-only on reranker failures."""
-    from backend.rag.pipeline import run_query_with_docs
+    """Run a single question through RAG; use Tavily web search if RAG has no answer.
 
+    This mirrors the corrective-RAG behaviour of the main safety agent so that
+    evaluation scores reflect the real system capability, not just the local
+    vector store coverage.
+    """
+    from backend.rag.pipeline import run_query_with_docs, run_query_with_web_context
+
+    answer = None
+    ctx_texts = ["No context retrieved"]
+
+    # --- 1. Try primary retriever ---
     try:
         result = run_query_with_docs(chain, retriever, question)
-        # Retrieve raw chunk texts for Ragas contexts.
+        answer = result["answer"]
         try:
             raw_docs = retriever.invoke(question)
-            ctx_texts = [d.page_content for d in raw_docs] or ["No context retrieved"]
+            ctx_texts = [d.page_content for d in raw_docs] or ctx_texts
         except Exception:
-            ctx_texts = ["No context retrieved"]
-        return result["answer"], ctx_texts
-
+            pass
     except Exception as exc:
         # Reranker / Cohere failure — retry with fallback if available.
         if fallback_chain and fallback_retriever and (
@@ -97,16 +134,38 @@ def _run_one_query(chain, retriever, question: str,
         ):
             try:
                 result = run_query_with_docs(fallback_chain, fallback_retriever, question)
+                answer = result["answer"]
                 try:
                     raw_docs = fallback_retriever.invoke(question)
-                    ctx_texts = [d.page_content for d in raw_docs] or ["No context retrieved"]
+                    ctx_texts = [d.page_content for d in raw_docs] or ctx_texts
                 except Exception:
-                    ctx_texts = ["No context retrieved"]
-                return result["answer"], ctx_texts
+                    pass
             except Exception as fb_exc:
-                return f"Error: {fb_exc}", ["Error retrieving context"]
+                answer = f"Error: {fb_exc}"
+        else:
+            answer = f"Error: {exc}"
 
-        return f"Error: {exc}", ["Error retrieving context"]
+    # --- 2. Corrective RAG: if RAG couldn't answer, try Tavily web search ---
+    if answer is None or _NO_ANSWER_SENTINEL in str(answer) or str(answer).startswith("Error:"):
+        ret = fallback_retriever or retriever
+        web_docs = _run_tavily_fallback(question)
+        if web_docs:
+            try:
+                result = run_query_with_web_context(ret, question, web_docs)
+                answer = result["answer"]
+                # Context for Ragas = web snippets + any local chunks
+                web_texts = [d.page_content for d in web_docs]
+                try:
+                    local_docs = ret.invoke(question)
+                    local_texts = [d.page_content for d in local_docs]
+                except Exception:
+                    local_texts = []
+                ctx_texts = web_texts + local_texts
+                print("🌐", end=" ")
+            except Exception as exc2:
+                print(f"\n    [Web-context query failed: {exc2}]", end=" ")
+
+    return answer or "Unable to retrieve answer.", ctx_texts
 
 
 def run_evaluation(retriever, chain, eval_set: List[dict], label: str,

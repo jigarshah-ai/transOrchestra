@@ -1,4 +1,4 @@
-"""Navigator Agent — Live Google Maps routing with per-state HazMat compliance."""
+"""Navigator Agent — Live Google Maps routing with weather and HazMat compliance."""
 
 import logging
 from typing import Dict
@@ -6,6 +6,7 @@ from typing import Dict
 from backend.agents.state import AgentState
 from backend.tools.location_extractor import extract_locations
 from backend.tools.maps_tool import get_route
+from backend.tools.weather_tool import get_route_weather
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ def navigator_agent_node(state: AgentState) -> AgentState:
     # ── Step 2: fetch route ────────────────────────────────────────────────────
     route = get_route(origin, destination)
 
+    # ── Step 2b: fetch weather for both endpoints via MCP weather server ──────
+    weather = get_route_weather(origin, destination)
+    logger.info(
+        "Route weather: %s (mock=%s)", weather["overall_safety"], weather["is_mock"]
+    )
+
     # ── Step 3: build markdown answer ─────────────────────────────────────────
     mock_badge = (
         "\n> ⚠️ *Simulated route — add `GOOGLE_MAPS_API_KEY` to `.env` "
@@ -56,6 +63,21 @@ def navigator_agent_node(state: AgentState) -> AgentState:
         ", ".join(route["states_crossed"]) if route["states_crossed"] else "unknown"
     )
 
+    # Weather section
+    mock_weather_badge = " *(mock data)*" if weather["is_mock"] else ""
+    weather_emoji = {
+        "CLEAR":     "✅",
+        "ADVISORY":  "🔵",
+        "CAUTION":   "⚠️",
+        "DANGEROUS": "🚨",
+    }.get(weather["overall_safety"], "❓")
+
+    weather_section = (
+        f"\n\n**{weather_emoji} Weather Assessment{mock_weather_badge}**\n"
+        f"{weather['raw_text']}"
+    )
+
+    # HazMat compliance section
     compliance_section = ""
     if route["compliance_notes"]:
         permit_states = [
@@ -84,23 +106,26 @@ def navigator_agent_node(state: AgentState) -> AgentState:
         f"| Est. drive time | {route['duration_text']} |\n"
         f"| With current traffic | {route['duration_in_traffic']} |\n"
         f"| States crossed | {states_str} |\n"
+        f"{weather_section}"
         f"{compliance_section}\n"
         f"---\n"
-        f"*Per 49 CFR 392.9, verify cargo securement before departure. "
-        f"Confirm HazMat placards meet all state requirements per 49 CFR 172.504.*"
+        f"*Per 49 CFR 392.14, drivers must reduce speed or pull over in hazardous "
+        f"weather conditions. Per 49 CFR 392.9, verify cargo securement before departure.*"
     )
 
     logger.info(
-        "Navigator: %.1f mi, %s, %d compliance notes",
+        "Navigator: %.1f mi, %s, %d compliance notes, weather=%s",
         route["distance_miles"],
         route["duration_in_traffic"],
         len(route["compliance_notes"]),
+        weather["overall_safety"],
     )
 
     return {
         **state,
         "final_answer":    answer,
         "route_data":      route,
+        "weather_data":    weather,
         "rag_sources":     [],
         "web_search_used": False,
     }

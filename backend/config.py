@@ -24,6 +24,8 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
+OPENWEATHERMAP_API_KEY: str = os.getenv("OPENWEATHERMAP_API_KEY", "")
+WEATHER_UNITS: str = os.getenv("WEATHER_UNITS", "imperial")
 
 # ── Storage ────────────────────────────────────────────────────────────────────
 CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
@@ -90,6 +92,11 @@ def _warn_missing_optional_keys() -> None:
         logger.warning(
             "GOOGLE_MAPS_API_KEY not set in .env — "
             "Navigator agent will use realistic mock route data."
+        )
+    if not OPENWEATHERMAP_API_KEY:
+        logger.warning(
+            "OPENWEATHERMAP_API_KEY not set — "
+            "weather tool will return mock data."
         )
 
 

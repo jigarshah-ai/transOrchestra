@@ -20,4 +20,5 @@ class AgentState(TypedDict):
     web_search_used: bool
     final_answer: str
     thread_id: str
-    route_data: Optional[Dict[str, Any]]  # populated by navigator_agent; None for all other intents
+    route_data: Optional[Dict[str, Any]]    # populated by navigator_agent; None for all other intents
+    weather_data: Optional[Dict[str, Any]]  # populated by navigator_agent via MCP weather server

@@ -81,7 +81,8 @@ def run_graph(query: str, thread_id: str = "default") -> dict:
         "web_search_used": False,
         "final_answer": "",
         "thread_id": thread_id,
-        "route_data": None,
+        "route_data":   None,
+        "weather_data": None,
     }
 
     try:
@@ -92,6 +93,7 @@ def run_graph(query: str, thread_id: str = "default") -> dict:
             "intent":          final_state.get("intent", "unknown"),
             "web_search_used": final_state.get("web_search_used", False),
             "route_data":      final_state.get("route_data"),
+            "weather_data":    final_state.get("weather_data"),
         }
     except Exception as exc:
         logger.error("Graph execution failed for thread '%s': %s", thread_id, exc)

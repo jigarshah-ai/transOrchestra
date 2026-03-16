@@ -53,12 +53,13 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 │  ┌─────────────┐ ┌──────────────┐       │
 │  │ Safety Agent│ │ Navigator    │       │
 │  │             │ │ Agent        │       │
-│  │ • BM25      │ │ • Route      │       │
-│  │ • Vector    │ │   analysis   │       │
-│  │ • Hybrid    │ │ • HOS checks │       │
-│  │ • Reranker  │ │ • Stub for   │       │
-│  │ • Tavily    │ │   Maps API   │       │
-│  │   fallback  │ └──────────────┘       │
+│  │ • BM25      │ │ • Google     │       │
+│  │ • Vector    │ │   Maps route │       │
+│  │ • Hybrid    │ │ • MCP Weather│       │
+│  │ • Reranker  │ │   Server     │       │
+│  │ • Tavily    │ │ • HazMat     │       │
+│  │   fallback  │ │   compliance │       │
+│  └─────────────┘ └──────────────┘       │
 │  └─────────────┘                        │
 │                                         │
 │  MemorySaver — thread-level persistence │
@@ -71,6 +72,8 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
     • Intent classification
     • Web search flag
     • Latency (ms)
+    • route_data  (map polyline + compliance — route queries only)
+    • weather_data (safety level + forecast — route queries only)
 ```
 
 ---
@@ -92,6 +95,9 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Web Search Fallback | Tavily API | tavily-python 0.3.9 |
 | Route Maps | Google Maps API + Folium | googlemaps 4.10.0 / folium 0.17.0 |
 | Map rendering (Streamlit) | streamlit-folium | 0.22.0 |
+| Weather Data | OpenWeatherMap REST API | httpx 0.27.0 |
+| MCP Server | Model Context Protocol | mcp 1.0.0 |
+| Async compatibility | nest-asyncio (FastAPI loop fix) | nest_asyncio ≥ 1.5.9 |
 | RAG Framework | LangChain | 0.2.16 |
 | Observability & Tracing | LangSmith | ≥ 0.1.112 |
 | Evaluation | Ragas (Faithfulness + Answer Relevancy) | 0.1.21 |
@@ -115,6 +121,7 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Ragas evaluation | ✅ | `eval/run_ragas.py` — Faithfulness + Answer Relevancy |
 | Observability & production tracing | ✅ | LangSmith — full trace of every LLM call, retriever, and agent hop |
 | Live route maps with compliance overlays | ✅ | Google Maps API + Folium + per-state HazMat compliance alerts |
+| MCP weather server + driving safety card | ✅ | OpenWeatherMap via MCP protocol — CLEAR / ADVISORY / CAUTION / DANGEROUS |
 
 ---
 
@@ -166,6 +173,8 @@ OPENAI_API_KEY=sk-...            # Required
 COHERE_API_KEY=...               # Optional (free at dashboard.cohere.com)
 TAVILY_API_KEY=tvly-...          # Optional (free at app.tavily.com)
 GOOGLE_MAPS_API_KEY=AIza...      # Optional (enables live routing — mock map works without it)
+OPENWEATHERMAP_API_KEY=...       # Optional (free 1M calls/month at openweathermap.org/api)
+WEATHER_UNITS=imperial           # imperial = °F / mph  |  metric = °C / kph
 CHROMA_PERSIST_DIR=./chroma_db
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 LLM_MODEL=gpt-4o-mini
@@ -240,7 +249,7 @@ Run a query through the full multi-agent graph.
 }
 ```
 
-**Response:**
+**Response (safety query):**
 ```json
 {
   "answer": "Per 49 CFR 395.3, a property-carrying driver may drive a maximum of 11 hours...",
@@ -250,7 +259,34 @@ Run a query through the full multi-agent graph.
   ],
   "intent": "safety_query",
   "web_search_used": false,
-  "latency_ms": 2341
+  "latency_ms": 2341,
+  "route_data": null,
+  "weather_data": null
+}
+```
+
+**Response (route query):**
+```json
+{
+  "answer": "**Route: Chicago, IL → Detroit, MI** ...",
+  "sources": [],
+  "intent": "route_query",
+  "web_search_used": false,
+  "latency_ms": 3821,
+  "route_data": {
+    "distance_miles": 281.4,
+    "duration_in_traffic": "4 hours 35 mins (with current traffic)",
+    "states_crossed": ["IL", "IN", "MI"],
+    "polyline_coords": [[41.87, -87.62], "..."],
+    "compliance_notes": ["..."],
+    "mock_data": true
+  },
+  "weather_data": {
+    "overall_safety": "ADVISORY",
+    "has_warning": false,
+    "raw_text": "Route weather summary\n\nORIGIN — Chicago, IL\n  Partly Cloudy...",
+    "is_mock": true
+  }
 }
 ```
 
@@ -301,9 +337,14 @@ The Dispatcher node classifies every query into one of four intents, then routes
 
 ---
 
-## Navigator Agent — Google Maps Integration
+## Navigator Agent — Google Maps + MCP Weather Integration
 
-The Navigator Agent provides **live driving routes with per-state HazMat compliance overlays** using the Google Maps Directions API. When no API key is configured it falls back seamlessly to a realistic mock route (Chicago → Detroit on I-94) so the map always renders.
+The Navigator Agent provides **live driving routes with per-state HazMat compliance overlays and real-time weather safety assessments**. It calls two external data sources in sequence:
+
+1. **Google Maps Directions API** — route geometry, distance, traffic-aware ETA
+2. **MCP Weather Server** — current conditions at origin + destination with a 4-level driving safety classification
+
+Both fall back to realistic mock data when API keys are absent, so the map and weather card always render.
 
 ### How a route query is processed
 
@@ -315,61 +356,100 @@ User: "Route from Chicago IL to Detroit MI"
           │
           ▼
   Navigator Agent
-  ├── location_extractor.py
+  ├── Step 1 — location_extractor.py
   │     LLM extracts: origin="Chicago, IL" destination="Detroit, MI"
   │
-  ├── maps_tool.get_route(origin, destination)
+  ├── Step 2 — maps_tool.get_route(origin, destination)
   │     ├── Google Maps Directions API (if GOOGLE_MAPS_API_KEY set)
   │     │     → polyline coords, distance, duration_in_traffic
   │     └── Mock I-94 route (if no API key)
   │           → 281.4 mi, 4h 35 mins, polyline coords
   │
-  ├── _detect_states(polyline_coords)
+  ├── Step 2b — weather_tool.get_route_weather(origin, destination)
+  │     │  (calls MCP weather server in-process)
+  │     ├── OpenWeatherMap API (if OPENWEATHERMAP_API_KEY set)
+  │     │     → temperature, wind, visibility, condition code
+  │     │     → _assess_driving_safety() → CLEAR / ADVISORY / CAUTION / DANGEROUS
+  │     └── Mock weather (if no API key)
+  │           → realistic partly-cloudy mock for both cities
+  │
+  ├── Step 3 — _detect_states(polyline_coords)
   │     → ["IL", "IN", "MI"]
   │
-  └── _build_compliance_notes(["IL", "IN", "MI"])
+  └── Step 4 — _build_compliance_notes(["IL", "IN", "MI"])
         → HazMat rules per state (permit requirements, tunnel restrictions, etc.)
           │
           ▼
-  AgentState.route_data → FastAPI → Streamlit
+  AgentState.route_data + AgentState.weather_data → FastAPI → Streamlit
           │
           ▼
-  render_route_map() → folium map rendered in chat
+  render_route_map(route_data)   → folium interactive map
+  render_weather_card(weather_data) → colour-coded safety card below map
 ```
 
-### Live screenshot — Chicago to Detroit
+### What renders in the Streamlit UI
 
-The screenshot below shows a confirmed working route query in the TransOrchestra UI:
+| UI element | Source | Condition |
+|---|---|---|
+| Route summary table | Navigator Agent markdown | Always for route queries |
+| HazMat compliance alerts | `compliance_notes` from maps_tool | When states have HazMat rules |
+| Interactive folium map | `route_data.polyline_coords` | Always for route queries |
+| **Weather safety card** | `weather_data` from MCP server | Always for route queries |
 
-> **Query:** *"Route from Chicago IL to Detroit MI"*
+### Weather safety levels
 
-The response includes:
-- Route summary table (distance, drive time, traffic-adjusted ETA, states crossed)
-- HazMat compliance alerts for Illinois *(permit required)*, Indiana, and Michigan *(permit required)*
-- An interactive folium map with the blue I-94 polyline, green origin marker, red destination marker, and orange state compliance markers
+| Level | Colour | Icon | Trigger |
+|---|---|---|---|
+| CLEAR | Green | ✅ | No hazards, wind < 25 mph, visibility > 1 km |
+| ADVISORY | Blue | 🔵 | Light rain, drizzle, moderate wind (25–40 mph) |
+| CAUTION | Amber | ⚠️ | Heavy rain, snow, fog, wind 40+ mph |
+| DANGEROUS | Red | 🚨 | Thunderstorm, blizzard, tornado, extreme wind |
 
-*[See screenshot: TransOrchestra route map — Chicago to Detroit with HazMat compliance overlay]*
+The card references the relevant FMCSA regulation (49 CFR 392.14) in its advisory text.
 
-### What the folium map shows
+### MCP Weather Server — how it works
+
+The weather integration uses the **Model Context Protocol (MCP)** pattern:
+
+```
+weather_tool.py (synchronous LangGraph tool)
+    │  asyncio.run() via nest_asyncio (safe inside FastAPI event loop)
+    ▼
+backend/mcp_servers/weather_server.py  (MCP Server instance)
+    │  _fetch_route_weather(origin, destination)
+    ▼
+OpenWeatherMap REST API  (or mock fallback if key missing)
+    → current conditions for both cities
+    → _assess_driving_safety() maps OWM condition codes to CLEAR/ADVISORY/CAUTION/DANGEROUS
+```
+
+The MCP server can also be run **standalone** for testing:
+```powershell
+python backend/mcp_servers/weather_server.py
+```
+
+### Folium map legend
 
 | Map element | Colour | Meaning |
 |---|---|---|
 | Route polyline | Blue | Driving path from Google Maps (or mock I-94) |
 | Origin marker | Green | Starting city |
 | Destination marker | Red | Ending city |
-| State compliance marker | Orange | Per-state HazMat rule — click to expand detail |
+| State compliance marker | Orange | Per-state HazMat rule — click to expand |
 
-### Google Maps API setup
+### API key setup
 
-1. Go to [console.cloud.google.com](https://console.cloud.google.com)
-2. Enable **Directions API**
-3. Create an API key and add to `.env`:
-   ```env
-   GOOGLE_MAPS_API_KEY=AIza...
-   ```
-4. Restart Uvicorn — the `*(mock data)*` badge disappears and live traffic data is used
+**Google Maps (live routing):**
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → Enable **Directions API**
+2. Add to `.env`: `GOOGLE_MAPS_API_KEY=AIza...`
 
-> **Without the API key** the mock route always works. The map renders with the full I-94 polyline and all three state compliance markers. Only the real-time traffic estimate is missing.
+**OpenWeatherMap (live weather):**
+1. Sign up at [openweathermap.org/api](https://openweathermap.org/api) (free, 1M calls/month)
+2. Add to `.env`: `OPENWEATHERMAP_API_KEY=your_key_here`
+
+Restart Uvicorn after adding keys — the `*(mock data)*` badges disappear automatically.
+
+> **Both keys are fully optional.** Mock route + mock weather render correctly without either key.
 
 ### Supported HazMat state rules (built-in)
 
@@ -478,16 +558,21 @@ transOrchestra/
 │   │
 │   ├── agents/                     # LangGraph multi-agent system
 │   │   ├── __init__.py
-│   │   ├── state.py                # AgentState TypedDict (incl. route_data)
+│   │   ├── state.py                # AgentState TypedDict (incl. route_data, weather_data)
 │   │   ├── graph.py                # Graph compilation + run_graph()
 │   │   ├── dispatcher.py           # Intent classification node
 │   │   ├── safety_agent.py         # FMCSA/DOT RAG node + Tavily fallback
 │   │   └── navigator_agent.py      # Google Maps routing + HazMat compliance
 │   │
+│   ├── mcp_servers/                # Model Context Protocol servers
+│   │   ├── __init__.py
+│   │   └── weather_server.py       # MCP weather server (OpenWeatherMap + safety classifier)
+│   │
 │   └── tools/                      # Reusable tool modules
 │       ├── __init__.py
 │       ├── location_extractor.py   # LLM-powered city/state extractor
-│       └── maps_tool.py            # Google Maps API + mock fallback + state rules
+│       ├── maps_tool.py            # Google Maps API + mock fallback + state rules
+│       └── weather_tool.py         # Sync wrapper — calls MCP weather server in-process
 │
 ├── frontend/
 │   └── app.py                      # Streamlit Control Tower UI
@@ -543,16 +628,17 @@ tests/test_retriever.py::TestBuildRerankingRetriever::test_falls_back_without_co
 
 ## Sample Queries
 
-| Type | Query | Expected Intent | Map rendered? |
-|---|---|---|---|
-| Safety | "Can a driver transport HazMat without a CDL endorsement?" | `safety_query` | No |
-| Safety | "What does placard 1203 indicate on a tanker?" | `safety_query` | No |
-| Safety | "How many hours can a driver operate before mandatory rest?" | `safety_query` | No |
-| Inspection | "What is required under Section 396.11 DVIR?" | `safety_query` | No |
-| Brakes | "What is the minimum brake lining thickness before replacement?" | `maintenance_query` | No |
-| Route | "Route from Chicago, IL to Detroit, MI" | `route_query` | **Yes** |
-| Route | "How long to drive from Houston TX to Dallas TX?" | `route_query` | **Yes** |
-| Route | "What is the best route from New York to Boston?" | `route_query` | **Yes** |
+| Type | Query | Expected Intent | Map rendered? | Weather card? |
+|---|---|---|---|---|
+| Safety | "Can a driver transport HazMat without a CDL endorsement?" | `safety_query` | No | No |
+| Safety | "What does placard 1203 indicate on a tanker?" | `safety_query` | No | No |
+| Safety | "How many hours can a driver operate before mandatory rest?" | `safety_query` | No | No |
+| Inspection | "What is required under Section 396.11 DVIR?" | `safety_query` | No | No |
+| Brakes | "What is the minimum brake lining thickness before replacement?" | `maintenance_query` | No | No |
+| Route | "Route from Chicago, IL to Detroit, MI" | `route_query` | **Yes** | **Yes** |
+| Route | "How long to drive from Houston TX to Dallas TX?" | `route_query` | **Yes** | **Yes** |
+| Route | "What is the best route from New York to Boston?" | `route_query` | **Yes** | **Yes** |
+| Route | "Plan a HazMat shipment from Los Angeles CA to Phoenix AZ" | `route_query` | **Yes** | **Yes** |
 
 ---
 
@@ -625,6 +711,7 @@ No API calls are made and no data is sent when tracing is off.
 | Limitation | Detail | Planned Fix |
 |---|---|---|
 | Google Maps key optional | Without `GOOGLE_MAPS_API_KEY` the navigator uses a mock I-94 route — map still renders | Add key to `.env` for live routing + real-time traffic |
+| OpenWeatherMap key optional | Without `OPENWEATHERMAP_API_KEY` the weather card shows realistic mock data — card always renders | Add key to `.env` for live conditions (free tier: 1M calls/month) |
 | State detection uses bounding boxes | 27 US states covered; precise state borders use simple lat/lng boxes | Replace with Google Maps reverse geocoding in v2.0 |
 | ChromaDB telemetry errors | `capture() takes 1 positional argument` — harmless posthog bug in v0.5.18 | Resolved in chromadb ≥ 0.5.20 |
 | Small corpus warning | `n_results` adjusted when fewer than 10 chunks exist | Ingest more PDFs |
@@ -646,4 +733,4 @@ For educational purposes — Analytics Vidya GenAI Pinnacle Capstone Project.
 
 ---
 
-*Built with LangChain · LangGraph · ChromaDB · OpenAI · Streamlit*
+*Built with LangChain · LangGraph · ChromaDB · OpenAI · Streamlit · Google Maps · OpenWeatherMap MCP*

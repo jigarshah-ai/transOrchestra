@@ -34,6 +34,7 @@ class QueryResponse(BaseModel):
     web_search_used: bool
     latency_ms: int
     route_data: Optional[Dict[str, Any]] = None
+    weather_data: Optional[Dict[str, Any]] = None
 
 
 class IngestRequest(BaseModel):
@@ -70,6 +71,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             web_search_used=result["web_search_used"],
             latency_ms=latency_ms,
             route_data=result.get("route_data"),
+            weather_data=result.get("weather_data"),
         )
     except Exception as exc:
         logger.error("/query endpoint error: %s", exc)

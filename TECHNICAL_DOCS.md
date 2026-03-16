@@ -10,15 +10,16 @@
 2. [Module Reference — RAG Pipeline](#2-module-reference--rag-pipeline)
 3. [Module Reference — Agents](#3-module-reference--agents)
 4. [Module Reference — Tools](#4-module-reference--tools)
-5. [Module Reference — API](#5-module-reference--api)
-6. [LangGraph State & Flow](#6-langgraph-state--flow)
-7. [Embedding Model Comparison](#7-embedding-model-comparison)
-8. [Retrieval Strategy Deep-Dive](#8-retrieval-strategy-deep-dive)
-9. [Corrective RAG Flow](#9-corrective-rag-flow)
-10. [Navigator Agent — Google Maps Flow](#10-navigator-agent--google-maps-flow)
-11. [Observability & Monitoring — LangSmith](#11-observability--monitoring--langsmith)
-12. [Evaluation Framework](#12-evaluation-framework)
-13. [Troubleshooting](#13-troubleshooting)
+5. [Module Reference — MCP Servers](#5-module-reference--mcp-servers)
+6. [Module Reference — API](#6-module-reference--api)
+7. [LangGraph State & Flow](#7-langgraph-state--flow)
+8. [Embedding Model Comparison](#8-embedding-model-comparison)
+9. [Retrieval Strategy Deep-Dive](#9-retrieval-strategy-deep-dive)
+10. [Corrective RAG Flow](#10-corrective-rag-flow)
+11. [Navigator Agent — Google Maps + Weather Flow](#11-navigator-agent--google-maps--weather-flow)
+12. [Observability & Monitoring — LangSmith](#12-observability--monitoring--langsmith)
+13. [Evaluation Framework](#13-evaluation-framework)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -40,6 +41,8 @@ All configuration is loaded from `.env` via `backend/config.py`. No values are h
 | `TOP_K_RERANK` | `3` | — | Number of documents after Cohere reranking |
 | `RELEVANCE_SCORE_THRESHOLD` | `0.6` | — | Minimum avg score before Tavily fallback triggers |
 | `GOOGLE_MAPS_API_KEY` | — | ❌ Optional | Google Maps Directions API key. Mock route used if missing |
+| `OPENWEATHERMAP_API_KEY` | — | ❌ Optional | OpenWeatherMap API key. Mock weather card used if missing |
+| `WEATHER_UNITS` | `imperial` | — | `imperial` = °F/mph — `metric` = °C/kph |
 | `LANGCHAIN_TRACING_V2` | `false` | ❌ Optional | Set `true` to enable LangSmith tracing |
 | `LANGCHAIN_API_KEY` | — | ❌ Optional | LangSmith API key (free at smith.langchain.com) |
 | `LANGCHAIN_PROJECT` | `transOrchestra` | — | LangSmith project name for trace grouping |
@@ -175,7 +178,8 @@ class AgentState(TypedDict):
     web_search_used: bool                     # Tavily was triggered
     final_answer: str                         # final response to user
     thread_id: str                            # MemorySaver thread key
-    route_data: Optional[dict]               # navigator_agent route + polyline; None for all other intents
+    route_data: Optional[dict]                # navigator_agent route + polyline; None for all other intents
+    weather_data: Optional[dict]              # MCP weather server result; None for non-route intents
 ```
 
 ---
@@ -225,21 +229,25 @@ Handles 3 failure modes gracefully:
 
 **`navigator_agent_node(state: AgentState) → AgentState`**
 
-Live Google Maps routing node. Execution flow:
+Live routing node with Google Maps and MCP weather integration. Execution flow:
 
 ```
-1. extract_locations(query)          ← LLM extracts origin + destination
-2. get_route(origin, destination)    ← Google Maps or mock fallback
-3. Build markdown answer table       ← distance, time, traffic ETA, states
-4. Build compliance_section          ← per-state HazMat rules and permit flags
-5. Set state["route_data"]           ← Streamlit reads this to render folium map
+1. extract_locations(query)                  ← LLM extracts origin + destination
+2. get_route(origin, destination)            ← Google Maps or mock fallback
+2b. get_route_weather(origin, destination)   ← MCP weather server or mock fallback
+    → weather emoji + safety level badge for the answer
+3. Build markdown answer table               ← distance, time, traffic ETA, states
+4. Inject weather_section                    ← weather assessment block with FMCSA ref
+5. Build compliance_section                  ← per-state HazMat rules and permit flags
+6. Set state["route_data"] + state["weather_data"]
 ```
 
-Returns `route_data=None` if location extraction fails (polite error message returned instead).
+Returns `route_data=None` and `weather_data=None` if location extraction fails (polite error message returned instead).
 
-Sets three state fields:
-- `state["final_answer"]` — markdown route table + compliance alerts
-- `state["route_data"]` — full route dict for Streamlit map rendering
+Sets four state fields:
+- `state["final_answer"]` — markdown route table + weather section + compliance alerts
+- `state["route_data"]` — full route dict for Streamlit folium map rendering
+- `state["weather_data"]` — weather dict for Streamlit colour-coded safety card
 - `state["rag_sources"]` — always `[]` (routes do not use the vector store)
 
 ---
@@ -273,7 +281,7 @@ Routing function `route_after_dispatch`:
 - Builds initial `AgentState` with `HumanMessage(query)`
 - Invokes with `{"configurable": {"thread_id": thread_id}}`
 - `MemorySaver` persists message history per thread_id
-- Returns `{"answer", "sources", "intent", "web_search_used"}`
+- Returns `{"answer", "sources", "intent", "web_search_used", "route_data", "weather_data"}`
 
 ---
 
@@ -367,7 +375,89 @@ Returns a hardcoded Chicago → Detroit route along I-94 with 9 real coordinate 
 
 ---
 
-## 5. Module Reference — API
+> See **Section 5** for the full MCP weather server and `weather_tool.py` documentation.
+
+---
+
+## 5. Module Reference — MCP Servers
+
+### `backend/mcp_servers/weather_server.py`
+
+This module implements a **Model Context Protocol (MCP) server** that exposes two weather tools to the agent system. It can be used in two modes:
+
+1. **In-process** — called directly by `weather_tool.py` via async function imports (no stdio transport, no subprocess).
+2. **Standalone** — run as a real MCP stdio server for testing: `python backend/mcp_servers/weather_server.py`
+
+#### Declared MCP tools
+
+**`get_current_weather(location, units="imperial")`**
+- Fetches current conditions for a single city from OpenWeatherMap `/weather` endpoint
+- Returns: `temperature`, `feels_like`, `humidity`, `wind speed + direction`, `visibility`, `driving safety level + message`
+
+**`get_weather_route_summary(origin, destination, units="imperial")`**
+- Fetches conditions at both route endpoints concurrently (via `asyncio.gather`)
+- Computes worst-case `overall_safety` across origin + destination
+- Returns combined formatted text block suitable for injecting into the chat answer
+
+#### Driving safety classifier — `_assess_driving_safety()`
+
+Maps OpenWeatherMap condition IDs to a 4-level safety scale:
+
+| Level | Score | OWM condition codes | Wind threshold | Visibility |
+|---|---|---|---|---|
+| `CLEAR` | 0 | Clear sky, few clouds | < 25 mph | > 1 km |
+| `ADVISORY` | 1 | Drizzle (3xx), light rain (500), mist/haze (7xx), wind 25–40 mph | 25–40 mph | — |
+| `CAUTION` | 2 | Heavy rain (501–531), snow (6xx), fog (741), wind 40+ mph, visibility < 1 km | 40+ mph | < 1 km |
+| `DANGEROUS` | 3 | Thunderstorm (2xx), heavy snow (602/621/622), tornado/ash/squall (762/771/781) | Extreme | — |
+
+The classifier also includes the relevant **FMCSA regulation reference** (49 CFR 392.14) in the advisory text for each non-CLEAR level.
+
+#### Mock data fallbacks
+
+`_mock_weather(location, units)` and `_mock_route_weather(origin, destination, units)` return realistic pre-canned responses (partly cloudy at origin, light rain at destination) tagged with `*(mock data)*`. These are called automatically when `OPENWEATHERMAP_API_KEY` is not set.
+
+#### Helper utilities
+
+| Function | Purpose |
+|---|---|
+| `_wind_direction(degrees)` | Converts 0–360° to 8-point compass (N/NE/E/SE/S/SW/W/NW) |
+| `_assess_driving_safety()` | Returns `{level, score, message, advice}` dict |
+
+---
+
+### `backend/tools/weather_tool.py`
+
+Synchronous LangGraph-callable wrapper around the async MCP weather server functions.
+
+**`get_weather(location, units=None) → dict`**
+
+```python
+{
+    "location":     "Chicago, IL",
+    "raw_text":     str,          # full formatted weather summary
+    "safety_level": str,          # CLEAR | ADVISORY | CAUTION | DANGEROUS
+    "is_mock":      bool          # True when OPENWEATHERMAP_API_KEY not set
+}
+```
+
+**`get_route_weather(origin, destination, units=None) → dict`**
+
+```python
+{
+    "origin":         str,
+    "destination":    str,
+    "raw_text":       str,          # full route weather summary text
+    "overall_safety": str,          # worst level across both endpoints
+    "has_warning":    bool,         # True when CAUTION or DANGEROUS
+    "is_mock":        bool
+}
+```
+
+**`nest_asyncio.apply()`** is called once at import time so `asyncio.run()` works correctly inside FastAPI's already-running event loop without raising `RuntimeError: This event loop is already running`.
+
+---
+
+## 6. Module Reference — API
 
 ### `backend/api/routes.py`
 
@@ -408,7 +498,7 @@ This restricts the API to the local Streamlit frontend in development. For produ
 
 ---
 
-## 6. LangGraph State & Flow
+## 7. LangGraph State & Flow
 
 ### Thread-level Memory
 
@@ -431,7 +521,7 @@ This ensures no node accidentally clears fields set by a previous node.
 
 ---
 
-## 7. Embedding Model Comparison
+## 8. Embedding Model Comparison
 
 ### BGE-small-en-v1.5 (default)
 
@@ -477,7 +567,7 @@ print("OpenAI top-3:", results["openai"])
 
 ---
 
-## 8. Retrieval Strategy Deep-Dive
+## 9. Retrieval Strategy Deep-Dive
 
 ### Why Hybrid Retrieval?
 
@@ -501,7 +591,7 @@ Cohere's cross-encoder model (`rerank-english-v3.0`) reads the full query and ea
 
 ---
 
-## 9. Corrective RAG Flow
+## 10. Corrective RAG Flow
 
 ```
 Query arrives
@@ -549,7 +639,7 @@ The relevance threshold (default 0.6) is configurable via `RELEVANCE_SCORE_THRES
 
 ---
 
-## 10. Navigator Agent — Google Maps Flow
+## 11. Navigator Agent — Google Maps + Weather Flow
 
 ### End-to-end flow
 
@@ -563,12 +653,12 @@ LangGraph dispatcher_node
     ▼
 navigator_agent_node
     │
-    ├─ extract_locations("Route from Chicago IL to Detroit MI")
+    ├─ Step 1: extract_locations("Route from Chicago IL to Detroit MI")
     │       ChatOpenAI → {"origin": "Chicago, IL",
     │                      "destination": "Detroit, MI",
     │                      "found": true, "confidence": "high"}
     │
-    ├─ get_route("Chicago, IL", "Detroit, MI")
+    ├─ Step 2: get_route("Chicago, IL", "Detroit, MI")
     │       ├── GOOGLE_MAPS_API_KEY set?
     │       │     YES → client.directions(origin, destination, mode="driving",
     │       │                             departure_time=now(), units="imperial")
@@ -584,29 +674,52 @@ navigator_agent_node
     │                                   IN: permit_required=False,
     │                                   MI: permit_required=True)
     │
-    ├─ Build markdown answer
-    │     Route table + HazMat alerts + 49 CFR reminders
+    ├─ Step 2b: get_route_weather("Chicago, IL", "Detroit, MI")
+    │       ├── weather_tool.py (sync wrapper, uses nest_asyncio)
+    │       │     └── asyncio.run(_fetch_route_weather(...))
+    │       │           └── MCP weather server
+    │       │                 ├── OPENWEATHERMAP_API_KEY set?
+    │       │                 │     YES → asyncio.gather(
+    │       │                 │              OWM /weather?q=Chicago,IL,
+    │       │                 │              OWM /weather?q=Detroit,MI
+    │       │                 │           )
+    │       │                 │           → _assess_driving_safety() for each city
+    │       │                 │           → worst = max(origin_score, dest_score)
+    │       │                 │     NO  → _mock_route_weather() → realistic mock text
+    │       │                 └── returns formatted route weather summary string
+    │       └── overall_safety = "CLEAR" | "ADVISORY" | "CAUTION" | "DANGEROUS"
+    │             weather emoji selected: ✅ / 🔵 / ⚠️ / 🚨
+    │
+    ├─ Step 3: Build markdown answer
+    │     Route table + weather section + HazMat alerts + 49 CFR reminders
     │
     └─ Return AgentState with:
-          final_answer = markdown string
-          route_data   = full route dict (polyline, states, compliance, etc.)
+          final_answer  = markdown string
+          route_data    = full route dict (polyline, states, compliance, etc.)
+          weather_data  = {overall_safety, has_warning, raw_text, is_mock}
     │
     ▼
 FastAPI QueryResponse
-    answer    = markdown
-    route_data = full dict (polyline_coords, compliance_notes, etc.)
-    intent    = "route_query"
+    answer       = markdown
+    route_data   = full route dict
+    weather_data = weather dict
+    intent       = "route_query"
     │
     ▼
 Streamlit frontend/app.py
-    st.markdown(answer)          ← renders route table + compliance text
-    render_route_map(route_data) ← renders folium map
+    st.markdown(answer)               ← renders route table + weather + compliance text
+    render_route_map(route_data)      ← renders folium map
         ├── folium.Map(CartoDB positron tiles)
         ├── PolyLine(coords, color="#185FA5")      ← blue route line
         ├── Marker(start, icon=green play)         ← origin
         ├── Marker(end,   icon=red flag)           ← destination
         └── Marker(state_center, icon=orange !)   ← per compliance note
-    st_folium(m, height=420)     ← renders in Streamlit
+    st_folium(m, height=420)
+    render_weather_card(weather_data) ← colour-coded safety card below map
+        ├── CLEAR     → green card  ✅
+        ├── ADVISORY  → blue card   🔵
+        ├── CAUTION   → amber card  ⚠️
+        └── DANGEROUS → red card    🚨
     st.warning("Permit required in: Illinois, Michigan")
 ```
 
@@ -618,6 +731,7 @@ Streamlit frontend/app.py
 | `intent` | `dispatcher_node` | `route_after_dispatch` routing |
 | `final_answer` | `navigator_agent_node` | FastAPI → Streamlit chat bubble |
 | `route_data` | `navigator_agent_node` | FastAPI → Streamlit `render_route_map()` |
+| `weather_data` | `navigator_agent_node` (via MCP) | FastAPI → Streamlit `render_weather_card()` |
 | `rag_sources` | Set to `[]` by navigator | Source expander (empty for route queries) |
 | `web_search_used` | Set to `False` by navigator | Web search badge (hidden for routes) |
 
@@ -660,6 +774,26 @@ Streamlit frontend/app.py
 }
 ```
 
+### weather_data schema
+
+```python
+{
+    # Identity
+    "origin":         str,          # as passed to get_route_weather()
+    "destination":    str,
+
+    # Summary
+    "raw_text":       str,          # full formatted route weather text block
+    "overall_safety": str,          # CLEAR | ADVISORY | CAUTION | DANGEROUS
+    "has_warning":    bool,         # True when CAUTION or DANGEROUS
+    "is_mock":        bool,         # True when OPENWEATHERMAP_API_KEY not set
+}
+```
+
+`render_weather_card(weather_data)` in `frontend/app.py` uses `overall_safety` to select the card background colour and icon, then renders `raw_text` verbatim in a `<pre>` block inside a styled `<div>`. If `is_mock=True`, a note is appended pointing the user to add their API key.
+
+---
+
 ### Folium map layers
 
 | Layer | folium object | Colour | Condition |
@@ -672,7 +806,7 @@ Streamlit frontend/app.py
 
 ---
 
-## 11. Observability & Monitoring — LangSmith
+## 12. Observability & Monitoring — LangSmith
 
 ### Overview
 
@@ -794,7 +928,7 @@ Set `LANGCHAIN_TRACING_V2=false` in `.env`. No data is sent, no API calls are ma
 
 ---
 
-## 12. Evaluation Framework
+## 13. Evaluation Framework
 
 ### 10.1 Ragas Metrics Explained
 
@@ -847,7 +981,7 @@ Typical causes of low answer relevancy:
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### `chroma-hnswlib` build error on Windows
 
@@ -961,6 +1095,49 @@ Common causes:
 - **Key restrictions** — if the key has IP or HTTP referer restrictions, API calls from a server may be blocked. Use an unrestricted key for local development.
 
 The system falls back to mock data automatically on any API failure, so the app continues to work.
+
+---
+
+### Weather card does not appear after a route query
+
+1. Confirm the query was classified as `route_query` — check the **Intent badge** in the chat. Only route queries populate `weather_data`.
+2. Confirm `nest_asyncio` is installed: `pip show nest_asyncio`. The package is required for `asyncio.run()` to work inside FastAPI's running event loop.
+3. Check FastAPI logs for `Weather fetch error` — this means the OWM API call failed. The tool should fall back to mock data automatically; if you see an error card, check the `OPENWEATHERMAP_API_KEY` value in `.env`.
+4. If the card renders but shows `*(mock data)*`, add your `OPENWEATHERMAP_API_KEY` to `.env` and restart Uvicorn.
+
+---
+
+### `nest_asyncio` AttributeError at startup
+
+```
+AttributeError: module 'nest_asyncio' has no attribute 'patch'
+```
+
+This error occurs with older versions of `nest_asyncio` that used `patch()` instead of `apply()`. The code uses `nest_asyncio.apply()`. Ensure you have version ≥ 1.5.9:
+
+```powershell
+pip install "nest_asyncio>=1.5.9"
+```
+
+---
+
+### OpenWeatherMap API returns 401 Unauthorized
+
+Your `OPENWEATHERMAP_API_KEY` in `.env` is incorrect or not yet activated. New keys can take up to 2 hours to activate after signup. In the meantime, the mock data fallback renders correctly — no user-visible error occurs.
+
+---
+
+### OpenWeatherMap API returns 404 for a city
+
+The city name was not recognized by the OWM geocoder. Use the `City, StateCode, CountryCode` format:
+
+```
+Chicago, IL, US     ✅ correct
+Chigago, IL         ❌ typo — returns 404
+Springfield         ❌ ambiguous — multiple matches
+```
+
+The `location_extractor.py` LLM typically provides clean city/state pairs, so this is rare in practice.
 
 ---
 

@@ -36,6 +36,47 @@ if "thread_id" not in st.session_state:
 
 # ── Folium map helper ──────────────────────────────────────────────────────────
 
+def render_weather_card(weather_data: dict) -> None:
+    """Render a colour-coded weather card with safety level indicator.
+
+    Safety levels:
+      CLEAR     → green card   ✅
+      ADVISORY  → blue card    🔵
+      CAUTION   → amber card   ⚠️
+      DANGEROUS → red card     🚨
+
+    Shown alongside the folium map for route_query responses only.
+    """
+    if not weather_data or not weather_data.get("raw_text"):
+        return
+
+    safety = weather_data.get("overall_safety", "CLEAR")
+    cfg = {
+        "CLEAR":     {"bg": "#EAF3DE", "border": "#639922", "icon": "✅", "label": "Clear"},
+        "ADVISORY":  {"bg": "#E6F1FB", "border": "#185FA5", "icon": "🔵", "label": "Advisory"},
+        "CAUTION":   {"bg": "#FAEEDA", "border": "#BA7517", "icon": "⚠️",  "label": "Caution"},
+        "DANGEROUS": {"bg": "#FCEBEB", "border": "#A32D2D", "icon": "🚨", "label": "Dangerous"},
+    }.get(safety, {"bg": "#EAF3DE", "border": "#639922", "icon": "✅", "label": "Clear"})
+
+    mock_note = " *(mock — set OPENWEATHERMAP_API_KEY for live data)*" \
+                if weather_data.get("is_mock") else ""
+
+    st.markdown(
+        f"""<div style="
+            background:{cfg['bg']};
+            border-left:4px solid {cfg['border']};
+            border-radius:8px;
+            padding:12px 16px;
+            margin:8px 0 12px 0;
+        ">
+        <b>{cfg['icon']} Weather: {cfg['label']}{mock_note}</b>
+        <pre style="margin:8px 0 0 0;font-size:12px;background:transparent;
+                    border:none;white-space:pre-wrap;">{weather_data['raw_text']}</pre>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_route_map(route_data: dict) -> None:
     """Render an interactive folium map for the given route.
 
@@ -194,6 +235,10 @@ for msg in st.session_state.messages:
             if msg.get("route_data"):
                 render_route_map(msg["route_data"])
 
+            # Weather card — shown alongside map for route queries
+            if msg.get("weather_data"):
+                render_weather_card(msg["weather_data"])
+
             # Source citations
             sources = msg.get("sources", [])
             if sources:
@@ -252,6 +297,7 @@ if user_input:
 
                 answer = data.get("answer", "No answer returned.")
                 route_data = data.get("route_data")
+                weather_data = data.get("weather_data")
                 sources = data.get("sources", [])
                 intent = data.get("intent", "")
                 web_search_used = data.get("web_search_used", False)
@@ -262,6 +308,10 @@ if user_input:
                 # Folium map — only rendered when navigator returned route_data
                 if route_data:
                     render_route_map(route_data)
+
+                # Weather card — only rendered for route queries
+                if weather_data:
+                    render_weather_card(weather_data)
 
                 # Source citations
                 if sources:
@@ -291,7 +341,7 @@ if user_input:
                     with badge_cols[2]:
                         st.caption(f"⏱ {latency_ms} ms")
 
-                # Persist message including route_data for map re-render on rerun
+                # Persist message with route + weather data for re-render on Streamlit rerun
                 st.session_state.messages.append({
                     "role":            "assistant",
                     "content":         answer,
@@ -300,6 +350,7 @@ if user_input:
                     "web_search_used": web_search_used,
                     "latency_ms":      latency_ms,
                     "route_data":      route_data,
+                    "weather_data":    weather_data,
                 })
 
             except requests.exceptions.ConnectionError:

@@ -212,7 +212,7 @@ def _dot_escape(s: str) -> str:
 
 
 def render_flow_viz(flow_data: dict) -> None:
-    """Render graph flow: nodes, edges, and highlight execution path for this request."""
+    """Render graph flow compactly."""
     if not flow_data:
         return
     nodes = flow_data.get("nodes", [])
@@ -222,20 +222,20 @@ def render_flow_viz(flow_data: dict) -> None:
     if not nodes and not edges:
         return
 
-    # Tighten layout to reduce size in Streamlit's Graphviz renderer.
+    # Tighter layout instructions for Graphviz
     lines = [
         "digraph G {",
         "  rankdir=LR;",
-        "  graph [margin=0, pad=0, ranksep=0.2, nodesep=0.2];",
-        "  node [shape=box, style=rounded, margin=0.01, fontsize=9, fontname=\"Helvetica\"];",
-        "  edge [fontname=\"Helvetica\", fontsize=9];",
+        "  size=\"6,2\";", # Restrict the overall physical size of the image
+        "  graph [margin=0, pad=0.1, ranksep=0.3, nodesep=0.1];",
+        "  node [shape=box, style=rounded, margin=0.05, height=0.3, fontsize=10, fontname=\"Helvetica\"];",
+        "  edge [fontname=\"Helvetica\", fontsize=8, arrowsize=0.5];",
     ]
     for n in nodes:
         nid = _dot_escape(n.get("id", ""))
         label = _dot_escape(n.get("label", nid))
         tools = n.get("tools", [])
         if tools:
-            # Keep the diagram compact by showing at most 1 tool hint per node.
             tool_str = "\\n".join(_dot_escape(t) for t in tools[:1])
             label = f"{label}\\n({tool_str})"
         if nid in execution_path:
@@ -255,10 +255,12 @@ def render_flow_viz(flow_data: dict) -> None:
     lines.append("}")
 
     dot = "\n".join(lines)
-    with st.expander("🔄 Agent flow (this request)", expanded=True):
-        st.caption("Filled nodes = path taken for this query. Labels on edges = intent branch.")
-        st.graphviz_chart(dot, use_container_width=True)
-
+    
+    # Do not expand this by default either to save vertical space
+    with st.expander("🔄 Agent flow (this request)", expanded=False):
+        st.caption("Filled nodes = path taken. Labels on edges = intent branch.")
+        # Removed use_container_width=True so it respects the size="6,2" rule above
+        st.graphviz_chart(dot)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -368,23 +370,33 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
         if msg["role"] == "assistant":
+            msg_ = msg
             # Folium map — only for route queries
-            if msg.get("route_data"):
-                render_route_map(msg["route_data"])
+            if msg_.get("route_data"):
+                render_route_map(msg_["route_data"])
 
             # Weather card — shown alongside map for route queries
-            if msg.get("weather_data"):
-                render_weather_card(msg["weather_data"])
-            if msg.get("llm_comparison"):
-                render_model_comparison(msg["llm_comparison"])
-            if msg.get("flow_data"):
-                render_flow_viz(msg["flow_data"])
-            if msg.get("extracted_doc_data"):
-                with st.expander("📑 Extracted Document Data"):
-                    st.json(msg["extracted_doc_data"])
+            if msg_.get("weather_data"):
+                render_weather_card(msg_["weather_data"])
+            if msg_.get("llm_comparison"):
+                render_model_comparison(msg_["llm_comparison"])
+            if msg_.get("flow_data"):
+                render_flow_viz(msg_["flow_data"])
+            if msg_.get("extracted_doc_data"):
+                doc_data = msg_["extracted_doc_data"]
+                with st.expander("📄 Document Extraction Results", expanded=True):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Origin", doc_data.get("origin", "N/A"))
+                        st.metric("Weight", doc_data.get("weight", "N/A"))
+                    with col2:
+                        st.metric("Destination", doc_data.get("destination", "N/A"))
+                        st.metric("Freight Class", doc_data.get("freight_class", "N/A"))
+                    st.caption(f"**Document Type:** {doc_data.get('document_type', 'N/A')}")
+                    st.caption(f"**Summary:** {doc_data.get('summary', '')}")
 
             # Source citations
-            sources = (msg.get("sources", []) or [])[:3]
+            sources = (msg_.get("sources", []) or [])[:3]
             if sources:
                 with st.expander("📄 Sources"):
                     for src in sources:
@@ -497,8 +509,21 @@ if user_input:
                 if flow_data:
                     render_flow_viz(flow_data)
                 if extracted_doc_data:
-                    with st.expander("📑 Extracted Document Data"):
-                        st.json(extracted_doc_data)
+                    with st.expander("📄 Document Extraction Results", expanded=True):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Origin", extracted_doc_data.get("origin", "N/A"))
+                            st.metric("Weight", extracted_doc_data.get("weight", "N/A"))
+                        with col2:
+                            st.metric("Destination", extracted_doc_data.get("destination", "N/A"))
+                            st.metric(
+                                "Freight Class",
+                                extracted_doc_data.get("freight_class", "N/A"),
+                            )
+                        st.caption(
+                            f"**Document Type:** {extracted_doc_data.get('document_type', 'N/A')}"
+                        )
+                        st.caption(f"**Summary:** {extracted_doc_data.get('summary', '')}")
                     # Consume-once: after successful extraction, don't route future queries to document_agent
                     # unless the user uploads a new image.
                     st.session_state.image_base64 = None

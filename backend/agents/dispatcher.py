@@ -46,7 +46,7 @@ async def dispatcher_node(state: AgentState) -> AgentState:
         # If an image is present, bypass LLM intent classification completely.
         if state.get("image_data"):
             logger.info("Dispatcher detected image upload — routing to document_agent.")
-            return {"query": query, "intent": "document_processing"}
+            return {"query": "Process uploaded document.", "intent": IntentCategory.DOCUMENT.value}
 
         # Initialize the LLM (intent classification only; skipped for document processing).
         llm = ChatOpenAI(

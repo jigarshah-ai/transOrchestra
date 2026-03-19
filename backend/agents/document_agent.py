@@ -25,16 +25,14 @@ class DocumentExtraction(BaseModel):
     summary: str
 
 
-def _to_data_url(image_data: str) -> str:
-    """Convert raw base64 into a data URL.
-
-    If the string already looks like a data URL, return it unchanged.
-    """
+def _normalize_base64(image_data: str) -> str:
+    """Return raw base64 without any `data:*;base64,` prefix."""
     img = (image_data or "").strip()
     if img.startswith("data:"):
-        return img
-    # Default to jpeg; most image encodings still decode fine even if the mime is slightly off.
-    return f"data:image/jpeg;base64,{img}"
+        # Expected format: data:image/jpeg;base64,<base64>
+        _, _, tail = img.partition("base64,")
+        return tail.strip()
+    return img
 
 
 async def document_agent_node(state: AgentState) -> Dict[str, Any]:
@@ -54,12 +52,28 @@ async def document_agent_node(state: AgentState) -> Dict[str, Any]:
     llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=settings.OPENAI_API_KEY)
     structured_llm = llm.with_structured_output(DocumentExtraction)
 
-    # Vision payload: text + image_url (base64).
-    prompt_text = f"Extract logistics data from this image. {query}".strip()
+    # Vision payload: OpenAI requires `data:<mime>;base64,<base64>` formatting.
+    base64_str = _normalize_base64(image_data)
+    image_url = f"data:image/jpeg;base64,{base64_str}"
+
     message = HumanMessage(
         content=[
-            {"type": "text", "text": prompt_text},
-            {"type": "image_url", "image_url": {"url": _to_data_url(image_data)}},
+            {
+                "type": "text",
+                "text": (
+                    "You are extracting structured logistics fields from a shipping document "
+                    "(e.g., Bill of Lading / BOL, receipt, or packing slip).\n\n"
+                    "Extract the following fields exactly and return them in the required schema.\n\n"
+                    "Rules:\n"
+                    "- If a field is not visible or cannot be confidently read, return \"N/A\".\n"
+                    "- document_type: use one of {\"Bill of Lading\", \"Receipt\", \"Packing Slip\", \"Other\"}.\n"
+                    "- origin and destination: prefer City + State (or nearest readable location).\n"
+                    "- weight: return the numeric weight + unit if present (e.g., \"4250 lb\" or \"1,920 kg\").\n"
+                    "- freight_class: return the class as readable text (e.g., \"Class 70\"), or \"N/A\".\n\n"
+                    f"User note / what they care about: {query}\n"
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": image_url}},
         ]
     )
 

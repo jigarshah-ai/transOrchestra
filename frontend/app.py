@@ -15,7 +15,7 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from backend.config import EMBEDDING_MODEL
+from backend.config import settings
 
 BACKEND_URL = "http://localhost:8000/api/v1"
 DATA_DIR = project_root / "data"
@@ -209,7 +209,7 @@ with st.sidebar:
                 st.error(f"Ingestion error: {exc}")
 
     st.divider()
-    st.caption(f"**Active embedding:** {EMBEDDING_MODEL}")
+    st.caption(f"**Active embedding:** {settings.EMBEDDING_MODEL}")
     st.caption("**Vector store:** ChromaDB (local)")
 
     st.divider()
@@ -249,7 +249,7 @@ for msg in st.session_state.messages:
                         st.markdown(f"- **{filename}** — page {page}")
 
             # Status badges
-            badge_cols = st.columns([1, 1, 4])
+            badge_cols = st.columns([1, 1, 1, 1, 3])
             intent = msg.get("intent", "")
             if intent:
                 with badge_cols[0]:
@@ -258,17 +258,41 @@ for msg in st.session_state.messages:
                         f"border-radius:4px;font-size:0.75rem'>Intent: {intent}</span>",
                         unsafe_allow_html=True,
                     )
-            if msg.get("web_search_used"):
+            agent_used = msg.get("agent_used", "")
+            if agent_used:
                 with badge_cols[1]:
+                    st.markdown(
+                        f"<span style='background:#0f766e;color:white;padding:2px 8px;"
+                        f"border-radius:4px;font-size:0.75rem'>Agent: {agent_used}</span>",
+                        unsafe_allow_html=True,
+                    )
+            if msg.get("web_search_used"):
+                with badge_cols[2]:
                     st.markdown(
                         "<span style='background:#16a34a;color:white;padding:2px 8px;"
                         "border-radius:4px;font-size:0.75rem'>🌐 Web search used</span>",
                         unsafe_allow_html=True,
                     )
+            rel = msg.get("relevance_score")
+            if rel is not None:
+                with badge_cols[3]:
+                    st.markdown(
+                        f"<span style='background:#111827;color:white;padding:2px 8px;"
+                        f"border-radius:4px;font-size:0.75rem'>Relevance: {rel:.3f}</span>",
+                        unsafe_allow_html=True,
+                    )
             latency = msg.get("latency_ms")
             if latency:
-                with badge_cols[2]:
+                with badge_cols[4]:
                     st.caption(f"⏱ {latency} ms")
+
+            # Model info (small caption line)
+            llm_model = msg.get("llm_model")
+            embed_model = msg.get("embedding_model")
+            if llm_model or embed_model:
+                st.caption(
+                    f"Model: `{llm_model or 'unknown'}`  ·  Embeddings: `{embed_model or 'unknown'}`"
+                )
 
 # ── Chat input ─────────────────────────────────────────────────────────────────
 user_input = st.chat_input(
@@ -300,8 +324,12 @@ if user_input:
                 weather_data = data.get("weather_data")
                 sources = data.get("sources", [])
                 intent = data.get("intent", "")
+                agent_used = data.get("agent_used", "")
                 web_search_used = data.get("web_search_used", False)
                 latency_ms = data.get("latency_ms")
+                relevance_score = data.get("relevance_score")
+                llm_model = data.get("llm_model")
+                embedding_model = data.get("embedding_model")
 
                 st.markdown(answer)
 
@@ -322,7 +350,7 @@ if user_input:
                             st.markdown(f"- **{filename}** — page {page}")
 
                 # Status badges
-                badge_cols = st.columns([1, 1, 4])
+                badge_cols = st.columns([1, 1, 1, 1, 3])
                 if intent:
                     with badge_cols[0]:
                         st.markdown(
@@ -330,16 +358,35 @@ if user_input:
                             f"border-radius:4px;font-size:0.75rem'>Intent: {intent}</span>",
                             unsafe_allow_html=True,
                         )
-                if web_search_used:
+                if agent_used:
                     with badge_cols[1]:
+                        st.markdown(
+                            f"<span style='background:#0f766e;color:white;padding:2px 8px;"
+                            f"border-radius:4px;font-size:0.75rem'>Agent: {agent_used}</span>",
+                            unsafe_allow_html=True,
+                        )
+                if web_search_used:
+                    with badge_cols[2]:
                         st.markdown(
                             "<span style='background:#16a34a;color:white;padding:2px 8px;"
                             "border-radius:4px;font-size:0.75rem'>🌐 Web search used</span>",
                             unsafe_allow_html=True,
                         )
+                if relevance_score is not None:
+                    with badge_cols[3]:
+                        st.markdown(
+                            f"<span style='background:#111827;color:white;padding:2px 8px;"
+                            f"border-radius:4px;font-size:0.75rem'>Relevance: {float(relevance_score):.3f}</span>",
+                            unsafe_allow_html=True,
+                        )
                 if latency_ms:
-                    with badge_cols[2]:
+                    with badge_cols[4]:
                         st.caption(f"⏱ {latency_ms} ms")
+
+                if llm_model or embedding_model:
+                    st.caption(
+                        f"Model: `{llm_model or 'unknown'}`  ·  Embeddings: `{embedding_model or 'unknown'}`"
+                    )
 
                 # Persist message with route + weather data for re-render on Streamlit rerun
                 st.session_state.messages.append({
@@ -347,10 +394,14 @@ if user_input:
                     "content":         answer,
                     "sources":         sources,
                     "intent":          intent,
+                    "agent_used":      agent_used,
                     "web_search_used": web_search_used,
                     "latency_ms":      latency_ms,
                     "route_data":      route_data,
                     "weather_data":    weather_data,
+                    "relevance_score": relevance_score,
+                    "llm_model":       llm_model,
+                    "embedding_model": embedding_model,
                 })
 
             except requests.exceptions.ConnectionError:

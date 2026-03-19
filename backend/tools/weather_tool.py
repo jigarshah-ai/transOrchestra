@@ -1,20 +1,13 @@
-"""
-Weather tool for TransOrchestra LangGraph agents.
+"""Weather tool for TransOrchestra LangGraph agents (async-native).
 
-Synchronous wrappers around the async MCP weather server functions.
-Agents call get_weather() / get_route_weather() as regular Python functions.
-
-nest_asyncio is applied once at import time so asyncio.run() works correctly
-inside FastAPI's running event loop without raising RuntimeError.
+This is an async wrapper around the MCP weather server functions.
+It runs inside FastAPI's event loop (no asyncio.run, no nest_asyncio).
 """
 
-import asyncio
 import logging
 from typing import Dict
 
-import nest_asyncio
-
-from backend.config import OPENWEATHERMAP_API_KEY, WEATHER_UNITS
+from backend.config import settings
 from backend.mcp_servers.weather_server import (
     _fetch_route_weather,
     _fetch_weather,
@@ -22,13 +15,10 @@ from backend.mcp_servers.weather_server import (
     _mock_weather,
 )
 
-# Allow asyncio.run() inside an already-running event loop (FastAPI / uvicorn).
-nest_asyncio.apply()
-
 logger = logging.getLogger(__name__)
 
 
-def get_weather(location: str, units: str = None) -> Dict:
+async def get_weather(location: str, units: str | None = None) -> Dict:
     """Get current weather for a single location.
 
     Args:
@@ -42,18 +32,24 @@ def get_weather(location: str, units: str = None) -> Dict:
             safety_level (str)   — CLEAR | ADVISORY | CAUTION | DANGEROUS
             is_mock (bool)       — True when OPENWEATHERMAP_API_KEY is missing
     """
-    units = units or WEATHER_UNITS
+    units = units or settings.WEATHER_UNITS
 
     try:
-        if OPENWEATHERMAP_API_KEY:
-            raw     = asyncio.run(_fetch_weather(location, units))
+        if settings.OPENWEATHERMAP_API_KEY:
+            raw = await _fetch_weather(location, units)
             is_mock = False
         else:
             raw     = _mock_weather(location, units)
             is_mock = True
 
         safety_level = _parse_safety_level(raw)
-        return {"location": location, "raw_text": raw, "safety_level": safety_level, "is_mock": is_mock}
+        return {
+            "location": location,
+            "raw_text": raw,
+            "safety_level": safety_level,
+            "is_mock": is_mock,
+            "api_error": None,
+        }
 
     except Exception as exc:
         logger.error("Weather fetch error for %r: %s", location, exc)
@@ -62,10 +58,11 @@ def get_weather(location: str, units: str = None) -> Dict:
             "raw_text":     _mock_weather(location, units),
             "safety_level": "CLEAR",
             "is_mock":      True,
+            "api_error":    f"Weather API currently unavailable: {exc}",
         }
 
 
-def get_route_weather(origin: str, destination: str, units: str = None) -> Dict:
+async def get_route_weather(origin: str, destination: str, units: str | None = None) -> Dict:
     """Get weather at both route endpoints with a combined safety assessment.
 
     Args:
@@ -81,11 +78,11 @@ def get_route_weather(origin: str, destination: str, units: str = None) -> Dict:
             has_warning (bool)      — True when CAUTION or DANGEROUS
             is_mock (bool)
     """
-    units = units or WEATHER_UNITS
+    units = units or settings.WEATHER_UNITS
 
     try:
-        if OPENWEATHERMAP_API_KEY:
-            raw     = asyncio.run(_fetch_route_weather(origin, destination, units))
+        if settings.OPENWEATHERMAP_API_KEY:
+            raw = await _fetch_route_weather(origin, destination, units)
             is_mock = False
         else:
             raw     = _mock_route_weather(origin, destination, units)
@@ -99,6 +96,7 @@ def get_route_weather(origin: str, destination: str, units: str = None) -> Dict:
             "overall_safety": overall,
             "has_warning":    overall in ("CAUTION", "DANGEROUS"),
             "is_mock":        is_mock,
+            "api_error":      None,
         }
 
     except Exception as exc:
@@ -110,6 +108,7 @@ def get_route_weather(origin: str, destination: str, units: str = None) -> Dict:
             "overall_safety": "CLEAR",
             "has_warning":    False,
             "is_mock":        True,
+            "api_error":      f"Weather API currently unavailable: {exc}",
         }
 
 

@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.agents.graph import run_graph
-from backend.config import EMBEDDING_MODEL, LLM_MODEL
+from backend.config import settings
 from backend.rag.embeddings import get_embedding_model
 from backend.rag.loader import load_and_chunk_pdfs, load_single_pdf
 from backend.rag.vectorstore import build_vectorstore
@@ -31,10 +31,14 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list
     intent: str
+    agent_used: str
     web_search_used: bool
     latency_ms: int
     route_data: Optional[Dict[str, Any]] = None
     weather_data: Optional[Dict[str, Any]] = None
+    relevance_score: Optional[float] = None
+    llm_model: str
+    embedding_model: str
 
 
 class IngestRequest(BaseModel):
@@ -62,16 +66,20 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     """Run *request.query* through the full multi-agent graph and return the result."""
     start_ms = int(time.time() * 1000)
     try:
-        result = run_graph(request.query, thread_id=request.thread_id)
+        result = await run_graph(request.query, thread_id=request.thread_id)
         latency_ms = int(time.time() * 1000) - start_ms
         return QueryResponse(
             answer=result["answer"],
             sources=result["sources"],
             intent=result["intent"],
+            agent_used=result.get("agent_used", ""),
             web_search_used=result["web_search_used"],
             latency_ms=latency_ms,
             route_data=result.get("route_data"),
             weather_data=result.get("weather_data"),
+            relevance_score=result.get("relevance_score"),
+            llm_model=result.get("llm_model", settings.LLM_MODEL),
+            embedding_model=result.get("embedding_model", settings.EMBEDDING_MODEL),
         )
     except Exception as exc:
         logger.error("/query endpoint error: %s", exc)
@@ -95,7 +103,7 @@ async def ingest_endpoint(request: IngestRequest) -> IngestResponse:
                 detail="No valid PDF files found at the provided paths.",
             )
 
-        embedding_model = get_embedding_model(EMBEDDING_MODEL)
+        embedding_model = get_embedding_model(settings.EMBEDDING_MODEL)
         build_vectorstore(all_docs, embedding_model)
 
         logger.info("Ingestion complete: %d chunks from %d files", len(all_docs), len(request.pdf_paths))
@@ -110,4 +118,4 @@ async def ingest_endpoint(request: IngestRequest) -> IngestResponse:
 @router.get("/health", response_model=HealthResponse)
 async def health_endpoint() -> HealthResponse:
     """Simple liveness check."""
-    return HealthResponse(status="ok", version="1.0.0", model=LLM_MODEL)
+    return HealthResponse(status="ok", version="1.0.0", model=settings.LLM_MODEL)

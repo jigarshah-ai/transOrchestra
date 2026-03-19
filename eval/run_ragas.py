@@ -1,6 +1,7 @@
 """Ragas evaluation script for TransOrchestra RAG pipeline."""
 
 import argparse
+import asyncio
 import json
 import sys
 import warnings
@@ -43,24 +44,16 @@ def build_hybrid_pipeline() -> Tuple:
     The fallback pair uses hybrid-only (no reranker) so evaluation continues
     gracefully when the Cohere API key is missing or invalid.
     """
-    from backend.rag.embeddings import get_embedding_model
-    from backend.rag.pipeline import build_rag_chain
-    from backend.rag.retriever import build_hybrid_retriever, build_reranking_retriever
-    from backend.rag.vectorstore import load_vectorstore
+    from backend.rag.manager import RagManager
 
-    embedding_model = get_embedding_model()
-    vectorstore = load_vectorstore(embedding_model)
-    docs = _get_docs_from_vectorstore(vectorstore)
-
-    hybrid = build_hybrid_retriever(vectorstore, docs)
-    retriever = build_reranking_retriever(hybrid, docs)
-    chain = build_rag_chain(retriever)
-
-    # Always build a pure-hybrid fallback for when the reranker call fails.
-    fallback_retriever = build_hybrid_retriever(vectorstore, docs)
-    fallback_chain = build_rag_chain(fallback_retriever)
-
-    return retriever, chain, fallback_retriever, fallback_chain
+    # Reuse one-time initialized resources.
+    resources = asyncio.run(RagManager.instance().get_resources())
+    return (
+        resources.reranking_retriever,
+        resources.reranking_chain,
+        resources.hybrid_retriever,
+        resources.hybrid_chain,
+    )
 
 
 def build_vector_only_pipeline() -> Tuple:

@@ -21,7 +21,7 @@ from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from backend.config import OPENWEATHERMAP_API_KEY, WEATHER_UNITS
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
         if name == "get_current_weather":
             result = await _fetch_weather(
                 location=arguments["location"],
-                units=arguments.get("units", WEATHER_UNITS),
+                units=arguments.get("units", settings.WEATHER_UNITS),
             )
             return [types.TextContent(type="text", text=result)]
 
@@ -103,7 +103,7 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
             result = await _fetch_route_weather(
                 origin=arguments["origin"],
                 destination=arguments["destination"],
-                units=arguments.get("units", WEATHER_UNITS),
+                units=arguments.get("units", settings.WEATHER_UNITS),
             )
             return [types.TextContent(type="text", text=result)]
 
@@ -119,7 +119,7 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
 
 async def _fetch_weather(location: str, units: str = "imperial") -> str:
     """Fetch current weather from OpenWeatherMap and return a formatted string."""
-    if not OPENWEATHERMAP_API_KEY:
+    if not settings.OPENWEATHERMAP_API_KEY:
         return _mock_weather(location, units)
 
     unit_label  = "°F" if units == "imperial" else "°C"
@@ -128,7 +128,7 @@ async def _fetch_weather(location: str, units: str = "imperial") -> str:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(
             f"{OWM_BASE}/weather",
-            params={"q": location, "appid": OPENWEATHERMAP_API_KEY, "units": units},
+            params={"q": location, "appid": settings.OPENWEATHERMAP_API_KEY, "units": units},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -161,7 +161,7 @@ async def _fetch_route_weather(
     origin: str, destination: str, units: str = "imperial"
 ) -> str:
     """Fetch weather at both route endpoints and produce a combined safety summary."""
-    if not OPENWEATHERMAP_API_KEY:
+    if not settings.OPENWEATHERMAP_API_KEY:
         return _mock_route_weather(origin, destination, units)
 
     unit_label  = "°F" if units == "imperial" else "°C"
@@ -170,9 +170,9 @@ async def _fetch_route_weather(
     async with httpx.AsyncClient(timeout=10.0) as client:
         o_resp, d_resp = await asyncio.gather(
             client.get(f"{OWM_BASE}/weather",
-                       params={"q": origin,      "appid": OPENWEATHERMAP_API_KEY, "units": units}),
+                       params={"q": origin,      "appid": settings.OPENWEATHERMAP_API_KEY, "units": units}),
             client.get(f"{OWM_BASE}/weather",
-                       params={"q": destination, "appid": OPENWEATHERMAP_API_KEY, "units": units}),
+                       params={"q": destination, "appid": settings.OPENWEATHERMAP_API_KEY, "units": units}),
         )
 
     o = o_resp.json()

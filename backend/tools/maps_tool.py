@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from backend.config import GOOGLE_MAPS_API_KEY
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -168,11 +168,11 @@ STATE_CENTERS: Dict[str, tuple] = {
 
 def _get_client():
     """Return an initialised googlemaps.Client or None if key is missing."""
-    if not GOOGLE_MAPS_API_KEY:
+    if not settings.GOOGLE_MAPS_API_KEY:
         return None
     try:
         import googlemaps
-        return googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+        return googlemaps.Client(key=settings.GOOGLE_MAPS_API_KEY)
     except Exception as exc:
         logger.error("Google Maps client init error: %s", exc)
         return None
@@ -199,7 +199,9 @@ def get_route(origin: str, destination: str) -> Dict:
 
     if client is None:
         logger.warning("No Google Maps API key — using mock route data.")
-        return _build_mock_route(origin, destination)
+        mock = _build_mock_route(origin, destination)
+        mock["api_error"] = "Google Maps API key not configured"
+        return mock
 
     try:
         import googlemaps.convert
@@ -215,7 +217,9 @@ def get_route(origin: str, destination: str) -> Dict:
 
         if not directions:
             logger.warning("No directions found: %r → %r", origin, destination)
-            return _build_mock_route(origin, destination)
+            mock = _build_mock_route(origin, destination)
+            mock["api_error"] = "No directions returned by Google Maps"
+            return mock
 
         route = directions[0]
         leg = route["legs"][0]
@@ -250,7 +254,10 @@ def get_route(origin: str, destination: str) -> Dict:
 
     except Exception as exc:
         logger.error("Google Maps API call failed: %s", exc)
-        return _build_mock_route(origin, destination)
+        # Provide mock data so UI stays usable, but include an error for the agent to explain.
+        mock = _build_mock_route(origin, destination)
+        mock["api_error"] = f"Maps API currently unavailable: {exc}"
+        return mock
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────

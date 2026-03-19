@@ -4,42 +4,18 @@ import logging
 from typing import List
 
 from langchain_core.documents import Document
+import anyio
 
 from backend.agents.state import AgentState
-from backend.config import (
-    CHROMA_PERSIST_DIR,
-    RELEVANCE_SCORE_THRESHOLD,
-    TAVILY_API_KEY,
-)
-from backend.rag.embeddings import get_embedding_model
+from backend.config import settings
 from backend.rag.pipeline import (
-    build_rag_chain,
     check_relevance_score,
     run_query_with_docs,
     run_query_with_web_context,
 )
-from backend.rag.retriever import build_hybrid_retriever, build_reranking_retriever
-from backend.rag.vectorstore import load_vectorstore
+from backend.rag.manager import RagManager
 
 logger = logging.getLogger(__name__)
-
-
-def _load_pipeline():
-    """Load vectorstore, build hybrid + reranking retriever, and return (retriever, chain)."""
-    embedding_model = get_embedding_model()
-    vectorstore = load_vectorstore(embedding_model)
-
-    # Reconstruct the document corpus for BM25 from ChromaDB.
-    raw = vectorstore._collection.get(include=["documents", "metadatas"])
-    docs: List[Document] = [
-        Document(page_content=text, metadata=meta)
-        for text, meta in zip(raw["documents"], raw["metadatas"])
-    ]
-
-    hybrid = build_hybrid_retriever(vectorstore, docs)
-    retriever = build_reranking_retriever(hybrid, docs)
-    chain = build_rag_chain(retriever)
-    return retriever, chain
 
 
 def _run_tavily_search(query: str) -> List[Document]:
@@ -52,7 +28,7 @@ def _run_tavily_search(query: str) -> List[Document]:
     try:
         from tavily import TavilyClient
 
-        client = TavilyClient(api_key=TAVILY_API_KEY)
+        client = TavilyClient(api_key=settings.TAVILY_API_KEY)
         results = client.search(query=query, max_results=3)
         docs: List[Document] = []
         for r in results.get("results", []):
@@ -72,13 +48,15 @@ def _run_tavily_search(query: str) -> List[Document]:
         return []
 
 
-def safety_agent_node(state: AgentState) -> AgentState:
+async def safety_agent_node(state: AgentState) -> AgentState:
     """Run the hybrid RAG pipeline with optional corrective web search."""
     query = state.get("query", "")
     web_search_used = False
 
     try:
-        retriever, chain = _load_pipeline()
+        resources = await RagManager.instance().get_resources()
+        # Use reranking retriever/chain as primary; it already falls back gracefully if key missing.
+        retriever, chain = resources.reranking_retriever, resources.reranking_chain
     except FileNotFoundError:
         logger.warning("Vector store not found — returning fallback response.")
         fallback = (
@@ -99,11 +77,17 @@ def safety_agent_node(state: AgentState) -> AgentState:
 
     # Corrective RAG: fall back to Tavily when local relevance is low.
     web_docs: List[Document] = []
+    relevance_score = None
     try:
         score = check_relevance_score(retriever, query)
-        logger.info("Relevance score: %.3f (threshold: %.3f)", score, RELEVANCE_SCORE_THRESHOLD)
+        relevance_score = score
+        logger.info(
+            "Relevance score: %.3f (threshold: %.3f)",
+            score,
+            settings.RELEVANCE_SCORE_THRESHOLD,
+        )
 
-        if score < RELEVANCE_SCORE_THRESHOLD and TAVILY_API_KEY:
+        if score < settings.RELEVANCE_SCORE_THRESHOLD and settings.TAVILY_API_KEY:
             logger.info("Low relevance score — triggering Tavily web search.")
             web_docs = _run_tavily_search(query)
             if web_docs:
@@ -120,13 +104,14 @@ def safety_agent_node(state: AgentState) -> AgentState:
 
     # Run RAG — with automatic fallback to hybrid retriever if reranker fails (e.g. bad API key).
     try:
-        result = _run_with_retriever(retriever, chain)
+        result = await anyio.to_thread.run_sync(_run_with_retriever, retriever, chain)
         return {
             **state,
             "rag_answer": result["answer"],
             "rag_sources": result["sources"],
             "web_search_used": web_search_used,
             "final_answer": result["answer"],
+            "relevance_score": relevance_score,
         }
     except Exception as exc:
         # If the reranker caused the failure (401, network, etc.) retry with hybrid only.
@@ -135,16 +120,12 @@ def safety_agent_node(state: AgentState) -> AgentState:
                 "Reranker failed (%s) — retrying with hybrid retriever only.", exc
             )
             try:
-                embedding_model = get_embedding_model()
-                vectorstore = load_vectorstore(embedding_model)
-                raw = vectorstore._collection.get(include=["documents", "metadatas"])
-                docs_fallback: List[Document] = [
-                    Document(page_content=text, metadata=meta)
-                    for text, meta in zip(raw["documents"], raw["metadatas"])
-                ]
-                fallback_retriever = build_hybrid_retriever(vectorstore, docs_fallback)
-                fallback_chain = build_rag_chain(fallback_retriever)
-                result = _run_with_retriever(fallback_retriever, fallback_chain)
+                resources = await RagManager.instance().get_resources()
+                fallback_retriever = resources.hybrid_retriever
+                fallback_chain = resources.hybrid_chain
+                result = await anyio.to_thread.run_sync(
+                    _run_with_retriever, fallback_retriever, fallback_chain
+                )
                 logger.info("Fallback to hybrid retriever succeeded.")
                 return {
                     **state,
@@ -152,6 +133,7 @@ def safety_agent_node(state: AgentState) -> AgentState:
                     "rag_sources": result["sources"],
                     "web_search_used": web_search_used,
                     "final_answer": result["answer"],
+                    "relevance_score": relevance_score,
                 }
             except Exception as fallback_exc:
                 logger.error("Fallback retriever also failed: %s", fallback_exc)
@@ -162,6 +144,7 @@ def safety_agent_node(state: AgentState) -> AgentState:
                     "rag_sources": [],
                     "web_search_used": web_search_used,
                     "final_answer": error_msg,
+                    "relevance_score": relevance_score,
                 }
 
         logger.error("Safety agent RAG query failed: %s", exc)
@@ -172,4 +155,5 @@ def safety_agent_node(state: AgentState) -> AgentState:
             "rag_sources": [],
             "web_search_used": web_search_used,
             "final_answer": error_msg,
+            "relevance_score": relevance_score,
         }

@@ -6,7 +6,7 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
-from backend.config import EMBEDDING_MODEL, OPENAI_API_KEY
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +19,13 @@ def get_embedding_model(model_name: str = None) -> Embeddings:
     else is loaded via HuggingFaceEmbeddings (sentence-transformers).
     """
     if model_name is None:
-        model_name = EMBEDDING_MODEL
+        model_name = settings.EMBEDDING_MODEL
 
     if model_name.startswith("text-embedding"):
         logger.info("Loading OpenAI embedding model: %s", model_name)
         try:
             from langchain_openai import OpenAIEmbeddings
-            return OpenAIEmbeddings(model=model_name, openai_api_key=OPENAI_API_KEY)
+            return OpenAIEmbeddings(model=model_name, openai_api_key=settings.OPENAI_API_KEY)
         except Exception as exc:
             logger.error("Failed to load OpenAI embeddings (%s): %s", model_name, exc)
             raise

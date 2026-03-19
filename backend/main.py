@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # config must be the first project import so LangSmith env vars are set
 # before any LangChain module is loaded.
-from backend.config import EMBEDDING_MODEL, LLM_MODEL
+from backend.config import settings
 from backend.api.routes import router
 
 logging.basicConfig(
@@ -39,8 +39,8 @@ app.include_router(router, prefix="/api/v1")
 async def startup_event() -> None:
     """Log startup configuration on application boot."""
     logger.info("TransOrchestra API starting...")
-    logger.info("Embedding model: %s", EMBEDDING_MODEL)
-    logger.info("LLM model: %s", LLM_MODEL)
+    logger.info("Embedding model: %s", settings.EMBEDDING_MODEL)
+    logger.info("LLM model: %s", settings.LLM_MODEL)
     tracing = os.getenv("LANGCHAIN_TRACING_V2", "false").lower()
     project = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
     if tracing == "true":

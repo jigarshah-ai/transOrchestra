@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from backend.agents.state import AgentState
-from backend.config import LLM_MODEL, OPENAI_API_KEY
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +20,13 @@ CLASSIFICATION_PROMPT = (
 )
 
 
-def dispatcher_node(state: AgentState) -> AgentState:
+async def dispatcher_node(state: AgentState) -> AgentState:
     """Extract the last user message, classify intent, and update state."""
     try:
         llm = ChatOpenAI(
-            model=LLM_MODEL,
+            model=settings.LLM_MODEL,
             temperature=0,
-            openai_api_key=OPENAI_API_KEY,
+            openai_api_key=settings.OPENAI_API_KEY,
         )
 
         messages = state.get("messages", [])
@@ -37,7 +37,7 @@ def dispatcher_node(state: AgentState) -> AgentState:
             query = state.get("query", "")
 
         prompt = CLASSIFICATION_PROMPT.format(query=query)
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
         raw_intent = response.content.strip().lower()
 
         intent = raw_intent if raw_intent in INTENT_CATEGORIES else "general"

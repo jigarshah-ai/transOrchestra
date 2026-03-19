@@ -9,7 +9,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from backend.config import CHUNK_OVERLAP, CHUNK_SIZE
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ def load_and_chunk_pdfs(pdf_dir: str) -> List[Document]:
         return []
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
 
@@ -56,8 +56,8 @@ def load_single_pdf(file_path: str) -> List[Document]:
         raise FileNotFoundError(f"PDF file not found: {file_path}")
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
 

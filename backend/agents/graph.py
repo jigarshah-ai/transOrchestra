@@ -11,6 +11,7 @@ from backend.agents.dispatcher import dispatcher_node
 from backend.agents.navigator_agent import navigator_agent_node
 from backend.agents.safety_agent import safety_agent_node
 from backend.agents.state import AgentState
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _get_graph():
     return _graph
 
 
-def run_graph(query: str, thread_id: str = "default") -> dict:
+async def run_graph(query: str, thread_id: str = "default") -> dict:
     """Invoke the full multi-agent graph for *query* and return a structured result dict."""
     compiled = _get_graph()
     config = {"configurable": {"thread_id": thread_id}}
@@ -83,17 +84,24 @@ def run_graph(query: str, thread_id: str = "default") -> dict:
         "thread_id": thread_id,
         "route_data":   None,
         "weather_data": None,
+        "relevance_score": None,
     }
 
     try:
-        final_state = compiled.invoke(initial_state, config=config)
+        final_state = await compiled.ainvoke(initial_state, config=config)
+        intent = final_state.get("intent", "unknown")
+        agent_used = "navigator_agent" if intent == "route_query" else "safety_agent"
         return {
             "answer":          final_state.get("final_answer", "No answer generated."),
             "sources":         final_state.get("rag_sources", []),
-            "intent":          final_state.get("intent", "unknown"),
+            "intent":          intent,
+            "agent_used":      agent_used,
             "web_search_used": final_state.get("web_search_used", False),
             "route_data":      final_state.get("route_data"),
             "weather_data":    final_state.get("weather_data"),
+            "relevance_score": final_state.get("relevance_score"),
+            "llm_model":       settings.LLM_MODEL,
+            "embedding_model": settings.EMBEDDING_MODEL,
         }
     except Exception as exc:
         logger.error("Graph execution failed for thread '%s': %s", thread_id, exc)

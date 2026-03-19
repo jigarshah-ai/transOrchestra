@@ -1,104 +1,143 @@
-"""Central configuration module — loads all settings from .env via python-dotenv."""
+"""Central configuration module.
 
-import os
+Production-grade settings via Pydantic BaseSettings with validation.
+
+IMPORTANT: This module is intentionally imported first (see `backend/main.py`) so
+LangSmith environment variables are forwarded to `os.environ` before any LangChain
+imports occur anywhere else in the codebase.
+"""
+
+from __future__ import annotations
+
 import logging
-from dataclasses import dataclass
-from dotenv import load_dotenv
+import os
+from pathlib import Path
+from typing import Literal, Optional
 
-load_dotenv()
-
-# ── LangSmith tracing ──────────────────────────────────────────────────────────
-# Must be set in os.environ BEFORE any LangChain module is imported so that
-# the LangChain callback machinery picks them up at import time.
-os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
-os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
-os.environ["LANGCHAIN_ENDPOINT"] = os.getenv(
-    "LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com"
-)
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
-# ── Core API keys ──────────────────────────────────────────────────────────────
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")
-TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
-GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
-OPENWEATHERMAP_API_KEY: str = os.getenv("OPENWEATHERMAP_API_KEY", "")
-WEATHER_UNITS: str = os.getenv("WEATHER_UNITS", "imperial")
 
-# ── Storage ────────────────────────────────────────────────────────────────────
-CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+class Settings(BaseSettings):
+    """Validated runtime configuration loaded from environment / `.env`."""
 
-# ── Model settings ─────────────────────────────────────────────────────────────
-EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    # Resolve `.env` reliably regardless of current working directory:
+    # - Prefer `<repo_root>/.env`
+    # - Also support a shared `Final_Project/.env` one level above the repo folder
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _ENV_CANDIDATES = (
+        _REPO_ROOT / ".env",
+        _REPO_ROOT.parent / ".env",
+    )
 
-# ── Chunking ───────────────────────────────────────────────────────────────────
-CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "512"))
-CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+    model_config = SettingsConfigDict(
+        env_file=[str(p) for p in _ENV_CANDIDATES if p.exists()] or ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
-# ── Retrieval ──────────────────────────────────────────────────────────────────
-TOP_K_RETRIEVAL: int = int(os.getenv("TOP_K_RETRIEVAL", "10"))
-TOP_K_RERANK: int = int(os.getenv("TOP_K_RERANK", "3"))
-RELEVANCE_SCORE_THRESHOLD: float = float(os.getenv("RELEVANCE_SCORE_THRESHOLD", "0.6"))
+    # ── Core API keys ──────────────────────────────────────────────────────────
+    OPENAI_API_KEY: str = Field(default="", description="OpenAI API key (required).")
+    COHERE_API_KEY: str = Field(default="", description="Cohere key (optional).")
+    TAVILY_API_KEY: str = Field(default="", description="Tavily key (optional).")
+    GOOGLE_MAPS_API_KEY: str = Field(default="", description="Google Maps key (optional).")
+    OPENWEATHERMAP_API_KEY: str = Field(default="", description="OpenWeatherMap key (optional).")
+
+    # ── Weather ────────────────────────────────────────────────────────────────
+    WEATHER_UNITS: Literal["imperial", "metric"] = "imperial"
+
+    # ── Storage ────────────────────────────────────────────────────────────────
+    CHROMA_PERSIST_DIR: Path = Field(default=Path("./chroma_db"))
+
+    # ── Model settings ─────────────────────────────────────────────────────────
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    LLM_MODEL: str = "gpt-4o-mini"
+
+    # ── Chunking ───────────────────────────────────────────────────────────────
+    CHUNK_SIZE: int = 512
+    CHUNK_OVERLAP: int = 50
+
+    # ── Retrieval ──────────────────────────────────────────────────────────────
+    TOP_K_RETRIEVAL: int = 10
+    TOP_K_RERANK: int = 3
+    RELEVANCE_SCORE_THRESHOLD: float = 0.6
+
+    # ── LangSmith tracing ──────────────────────────────────────────────────────
+    LANGCHAIN_TRACING_V2: str = "false"
+    LANGCHAIN_API_KEY: str = ""
+    LANGCHAIN_PROJECT: str = "transOrchestra"
+    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
+
+    @field_validator("CHROMA_PERSIST_DIR", mode="before")
+    @classmethod
+    def _coerce_path(cls, v):
+        return Path(v) if isinstance(v, str) else v
+
+    @field_validator("CHUNK_SIZE", "CHUNK_OVERLAP", "TOP_K_RETRIEVAL", "TOP_K_RERANK")
+    @classmethod
+    def _positive_ints(cls, v: int):
+        if v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+    @field_validator("RELEVANCE_SCORE_THRESHOLD")
+    @classmethod
+    def _threshold_range(cls, v: float):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("must be between 0.0 and 1.0")
+        return v
+
+    @field_validator("OPENAI_API_KEY")
+    @classmethod
+    def _openai_key_format(cls, v: str):
+        # Do not hard-fail at import time; allow the app to start and surface a clear
+        # runtime error on endpoints that require the key. If provided, it should
+        # at least look like a key.
+        v = (v or "").strip()
+        if v and len(v) < 20:
+            raise ValueError("OPENAI_API_KEY looks too short to be valid")
+        return v
+
+    @field_validator("LLM_MODEL")
+    @classmethod
+    def _llm_model_non_empty(cls, v: str):
+        if not v.strip():
+            raise ValueError("LLM_MODEL must be non-empty")
+        return v
+
+    @field_validator("EMBEDDING_MODEL")
+    @classmethod
+    def _embedding_model_non_empty(cls, v: str):
+        if not v.strip():
+            raise ValueError("EMBEDDING_MODEL must be non-empty")
+        return v
 
 
-@dataclass
-class Config:
-    """Typed container for all runtime configuration values."""
-    openai_api_key: str
-    cohere_api_key: str
-    tavily_api_key: str
-    chroma_persist_dir: str
-    embedding_model: str
-    llm_model: str
-    chunk_size: int
-    chunk_overlap: int
-    top_k_retrieval: int
-    top_k_rerank: int
-    relevance_score_threshold: float
+def _forward_langsmith_env(s: Settings) -> None:
+    """Forward LangSmith vars to os.environ before any LangChain imports."""
+    os.environ["LANGCHAIN_TRACING_V2"] = (s.LANGCHAIN_TRACING_V2 or "false")
+    os.environ["LANGCHAIN_API_KEY"] = (s.LANGCHAIN_API_KEY or "")
+    os.environ["LANGCHAIN_PROJECT"] = (s.LANGCHAIN_PROJECT or "transOrchestra")
+    os.environ["LANGCHAIN_ENDPOINT"] = (s.LANGCHAIN_ENDPOINT or "https://api.smith.langchain.com")
 
 
-def get_config() -> dict:
-    """Return all configuration values as a plain dictionary."""
-    _warn_missing_optional_keys()
-    return {
-        "openai_api_key": OPENAI_API_KEY,
-        "cohere_api_key": COHERE_API_KEY,
-        "tavily_api_key": TAVILY_API_KEY,
-        "chroma_persist_dir": CHROMA_PERSIST_DIR,
-        "embedding_model": EMBEDDING_MODEL,
-        "llm_model": LLM_MODEL,
-        "chunk_size": CHUNK_SIZE,
-        "chunk_overlap": CHUNK_OVERLAP,
-        "top_k_retrieval": TOP_K_RETRIEVAL,
-        "top_k_rerank": TOP_K_RERANK,
-        "relevance_score_threshold": RELEVANCE_SCORE_THRESHOLD,
-    }
+def _warn_optional_keys(s: Settings) -> None:
+    if not s.OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY is not set. LLM-powered features will fail until configured.")
+    if not s.COHERE_API_KEY:
+        logger.warning("COHERE_API_KEY is not set. Reranking will fall back to base retriever.")
+    if not s.TAVILY_API_KEY:
+        logger.warning("TAVILY_API_KEY is not set. Corrective web search will be disabled.")
+    if not s.GOOGLE_MAPS_API_KEY:
+        logger.warning("GOOGLE_MAPS_API_KEY not set — Navigator uses realistic mock route data.")
+    if not s.OPENWEATHERMAP_API_KEY:
+        logger.warning("OPENWEATHERMAP_API_KEY not set — weather tool will return mock data.")
 
 
-def _warn_missing_optional_keys() -> None:
-    """Log warnings for optional API keys that are not configured."""
-    if not COHERE_API_KEY:
-        logger.warning(
-            "COHERE_API_KEY is not set. Reranking will fall back to base retriever."
-        )
-    if not TAVILY_API_KEY:
-        logger.warning(
-            "TAVILY_API_KEY is not set. Corrective web search will be disabled."
-        )
-    if not GOOGLE_MAPS_API_KEY:
-        logger.warning(
-            "GOOGLE_MAPS_API_KEY not set in .env — "
-            "Navigator agent will use realistic mock route data."
-        )
-    if not OPENWEATHERMAP_API_KEY:
-        logger.warning(
-            "OPENWEATHERMAP_API_KEY not set — "
-            "weather tool will return mock data."
-        )
+# Singleton settings object used across the codebase.
+settings = Settings()
+_forward_langsmith_env(settings)
+_warn_optional_keys(settings)
 
-
-# Warn on import so misconfiguration surfaces early.
-_warn_missing_optional_keys()

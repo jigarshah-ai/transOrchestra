@@ -3,6 +3,8 @@
 import logging
 from typing import Dict
 
+import anyio
+
 from backend.agents.state import AgentState
 from backend.tools.location_extractor import extract_locations
 from backend.tools.maps_tool import get_route
@@ -11,7 +13,7 @@ from backend.tools.weather_tool import get_route_weather
 logger = logging.getLogger(__name__)
 
 
-def navigator_agent_node(state: AgentState) -> AgentState:
+async def navigator_agent_node(state: AgentState) -> AgentState:
     """Real navigator node:
 
     1. Extract origin + destination from the user query via LLM.
@@ -23,9 +25,9 @@ def navigator_agent_node(state: AgentState) -> AgentState:
     logger.info("Navigator agent processing: %s", query[:80])
 
     # ── Step 1: extract locations ──────────────────────────────────────────────
-    locations: Dict = extract_locations(query)
+    locations = await extract_locations(query)
 
-    if not locations.get("found"):
+    if not locations.found:
         return {
             **state,
             "final_answer": (
@@ -35,19 +37,22 @@ def navigator_agent_node(state: AgentState) -> AgentState:
                 "- *'How long to drive from Houston TX to Dallas TX?'*"
             ),
             "route_data":      None,
+            "weather_data":    None,
+            "relevance_score": None,
             "rag_sources":     [],
             "web_search_used": False,
         }
 
-    origin = locations["origin"]
-    destination = locations["destination"]
+    origin = locations.origin
+    destination = locations.destination
     logger.info("Routing: %r → %r", origin, destination)
 
     # ── Step 2: fetch route ────────────────────────────────────────────────────
-    route = get_route(origin, destination)
+    # googlemaps is sync; run in a worker thread to avoid blocking the event loop.
+    route = await anyio.to_thread.run_sync(get_route, origin, destination)
 
     # ── Step 2b: fetch weather for both endpoints via MCP weather server ──────
-    weather = get_route_weather(origin, destination)
+    weather = await get_route_weather(origin, destination)
     logger.info(
         "Route weather: %s (mock=%s)", weather["overall_safety"], weather["is_mock"]
     )
@@ -76,6 +81,16 @@ def navigator_agent_node(state: AgentState) -> AgentState:
         f"\n\n**{weather_emoji} Weather Assessment{mock_weather_badge}**\n"
         f"{weather['raw_text']}"
     )
+
+    # If tools fell back due to API errors, surface a compact note to the user.
+    tool_warnings = []
+    if route.get("api_error"):
+        tool_warnings.append(f"- **Maps**: {route['api_error']}")
+    if weather.get("api_error"):
+        tool_warnings.append(f"- **Weather**: {weather['api_error']}")
+    tool_warning_section = ""
+    if tool_warnings:
+        tool_warning_section = "\n\n**Tool availability notice**\n" + "\n".join(tool_warnings)
 
     # HazMat compliance section
     compliance_section = ""
@@ -107,6 +122,7 @@ def navigator_agent_node(state: AgentState) -> AgentState:
         f"| With current traffic | {route['duration_in_traffic']} |\n"
         f"| States crossed | {states_str} |\n"
         f"{weather_section}"
+        f"{tool_warning_section}"
         f"{compliance_section}\n"
         f"---\n"
         f"*Per 49 CFR 392.14, drivers must reduce speed or pull over in hazardous "
@@ -126,6 +142,7 @@ def navigator_agent_node(state: AgentState) -> AgentState:
         "final_answer":    answer,
         "route_data":      route,
         "weather_data":    weather,
+        "relevance_score": None,
         "rag_sources":     [],
         "web_search_used": False,
     }

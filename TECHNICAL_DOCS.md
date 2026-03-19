@@ -25,7 +25,11 @@
 
 ## 1. Configuration Reference
 
-All configuration is loaded from `.env` via `backend/config.py`. No values are hardcoded anywhere in the codebase.
+All configuration is loaded via **Pydantic Settings** (`BaseSettings`) in `backend/config.py` and exposed as a singleton `settings` object.
+
+`.env` discovery is production-hardened for your workspace layout:
+- Prefer `transOrchestra/.env`
+- Also supports `Final_Project/.env` (one level above the repo)
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
@@ -76,7 +80,7 @@ Routing logic:
 ```
 model_name starts with "text-embedding"  →  OpenAIEmbeddings(model=model_name)
 anything else                            →  HuggingFaceEmbeddings(model_name, device="cpu", normalize=True)
-model_name is None                       →  reads EMBEDDING_MODEL from config
+model_name is None                       →  reads EMBEDDING_MODEL from settings
 ```
 
 **`compare_embeddings(query: str, docs: List[Document]) → dict`**
@@ -180,16 +184,17 @@ class AgentState(TypedDict):
     thread_id: str                            # MemorySaver thread key
     route_data: Optional[dict]                # navigator_agent route + polyline; None for all other intents
     weather_data: Optional[dict]              # MCP weather server result; None for non-route intents
+    relevance_score: Optional[float]          # safety_agent relevance score (0.0–1.0); None for route intents
 ```
 
 ---
 
 ### `backend/agents/dispatcher.py`
 
-**`dispatcher_node(state: AgentState) → AgentState`**
+**`dispatcher_node(state: AgentState) → AgentState`** *(async)*
 
 - Extracts last `HumanMessage` from `state["messages"]`
-- Calls `ChatOpenAI` with classification prompt:
+- Calls `ChatOpenAI` with classification prompt using `await llm.ainvoke(...)`:
   ```
   Classify this logistics query into exactly one category.
   Return only the category name, nothing else.
@@ -205,17 +210,17 @@ class AgentState(TypedDict):
 
 **`safety_agent_node(state: AgentState) → AgentState`**
 
-Flow:
+Flow (async, production optimized):
 ```
-1. Load pipeline (vectorstore → hybrid → reranker → RAG chain)
+1. Get resources from RagManager (one-time init: embeddings + Chroma + retrievers + chains)
 2. check_relevance_score(retriever, query)
    ├── score >= threshold → proceed with RAG
    └── score < threshold AND TAVILY_API_KEY set
-       └── run Tavily search → prepend [WEB SOURCE] to query
-3. run_query_with_docs(chain, retriever, query)
+       └── run Tavily search → inject web results as Document context
+3. run_query_with_docs(chain, retriever, query)  (runs in worker thread)
 4. On Cohere 401/reranker failure:
-   └── retry with fresh hybrid-only retriever + chain
-5. Set state["rag_answer"], state["rag_sources"], state["web_search_used"], state["final_answer"]
+   └── retry with RagManager hybrid-only retriever + chain
+5. Set state["rag_answer"], state["rag_sources"], state["web_search_used"], state["final_answer"], state["relevance_score"]
 ```
 
 Handles 3 failure modes gracefully:
@@ -232,9 +237,9 @@ Handles 3 failure modes gracefully:
 Live routing node with Google Maps and MCP weather integration. Execution flow:
 
 ```
-1. extract_locations(query)                  ← LLM extracts origin + destination
-2. get_route(origin, destination)            ← Google Maps or mock fallback
-2b. get_route_weather(origin, destination)   ← MCP weather server or mock fallback
+1. extract_locations(query)                  ← structured output (`LocationInfo`) via `with_structured_output`
+2. get_route(origin, destination)            ← Google Maps or mock fallback (runs in worker thread)
+2b. get_route_weather(origin, destination)   ← async MCP weather server or mock fallback
     → weather emoji + safety level badge for the answer
 3. Build markdown answer table               ← distance, time, traffic ETA, states
 4. Inject weather_section                    ← weather assessment block with FMCSA ref
@@ -281,7 +286,7 @@ Routing function `route_after_dispatch`:
 - Builds initial `AgentState` with `HumanMessage(query)`
 - Invokes with `{"configurable": {"thread_id": thread_id}}`
 - `MemorySaver` persists message history per thread_id
-- Returns `{"answer", "sources", "intent", "web_search_used", "route_data", "weather_data"}`
+- Returns `{"answer", "sources", "intent", "agent_used", "web_search_used", "route_data", "weather_data", "relevance_score", "llm_model", "embedding_model"}`
 
 ---
 
@@ -289,14 +294,9 @@ Routing function `route_after_dispatch`:
 
 ### `backend/tools/location_extractor.py`
 
-**`extract_locations(query: str) → dict`**
+**`extract_locations(query: str) → LocationInfo`** *(async, structured output)*
 
-Uses `ChatOpenAI` (GPT-4o-mini, temperature=0) to parse natural language route queries into structured origin/destination pairs.
-
-Prompt strategy:
-- Instructs the model to return **only valid JSON** with no markdown fences
-- Strips markdown fences defensively if the model adds them anyway
-- Validates required keys before returning
+Uses `ChatOpenAI(...).with_structured_output(LocationInfo)` and `await llm.ainvoke(...)` to guarantee reliable parsing (no manual `json.loads` or fence stripping).
 
 Return shape:
 ```python
@@ -322,6 +322,8 @@ Falls back to `found=False` on JSON parse errors or LLM failures — the navigat
 **`get_route(origin: str, destination: str) → dict`**
 
 Main routing function. Tries the Google Maps Directions API first; falls back to mock data if key is missing or API call fails.
+
+**Robust failure behaviour:** When Google Maps is unavailable, it returns mock route data **plus** an `api_error` string (e.g. `"Maps API currently unavailable: ..."`). The Navigator agent surfaces this in the answer so the user understands what happened.
 
 Return shape:
 ```python
@@ -427,7 +429,7 @@ The classifier also includes the relevant **FMCSA regulation reference** (49 CFR
 
 ### `backend/tools/weather_tool.py`
 
-Synchronous LangGraph-callable wrapper around the async MCP weather server functions.
+Async-native LangGraph-callable wrapper around the MCP weather server functions (no `asyncio.run`, no `nest_asyncio`).
 
 **`get_weather(location, units=None) → dict`**
 
@@ -453,7 +455,7 @@ Synchronous LangGraph-callable wrapper around the async MCP weather server funct
 }
 ```
 
-**`nest_asyncio.apply()`** is called once at import time so `asyncio.run()` works correctly inside FastAPI's already-running event loop without raising `RuntimeError: This event loop is already running`.
+Both functions return `api_error: Optional[str]` when the upstream API fails so the agent can explain the degradation gracefully.
 
 ---
 
@@ -471,6 +473,12 @@ All routes are mounted at `/api/v1/` by `backend/main.py`.
 | `thread_id` | str | Conversation thread ID for memory persistence (default: "default") |
 
 Response includes `latency_ms` calculated from request start to response.
+
+Additional production telemetry fields returned for UI transparency:
+- `llm_model`
+- `embedding_model`
+- `agent_used`
+- `relevance_score` (safety agent only)
 
 Error handling: returns HTTP 500 with `{"detail": "Query processing failed: {reason}"}` on exceptions.
 
@@ -518,6 +526,10 @@ return {
 ```
 
 This ensures no node accidentally clears fields set by a previous node.
+
+### Async execution
+
+All nodes are async and the graph is executed with `compiled.ainvoke(...)`. Sync-heavy calls (Google Maps client + RAG chain `.invoke`) run in worker threads to avoid blocking the FastAPI event loop.
 
 ---
 
@@ -654,9 +666,7 @@ LangGraph dispatcher_node
 navigator_agent_node
     │
     ├─ Step 1: extract_locations("Route from Chicago IL to Detroit MI")
-    │       ChatOpenAI → {"origin": "Chicago, IL",
-    │                      "destination": "Detroit, MI",
-    │                      "found": true, "confidence": "high"}
+    │       ChatOpenAI.with_structured_output(LocationInfo) → LocationInfo(origin="Chicago, IL", destination="Detroit, MI", found=True)
     │
     ├─ Step 2: get_route("Chicago, IL", "Detroit, MI")
     │       ├── GOOGLE_MAPS_API_KEY set?
@@ -675,8 +685,8 @@ navigator_agent_node
     │                                   MI: permit_required=True)
     │
     ├─ Step 2b: get_route_weather("Chicago, IL", "Detroit, MI")
-    │       ├── weather_tool.py (sync wrapper, uses nest_asyncio)
-    │       │     └── asyncio.run(_fetch_route_weather(...))
+    │       ├── weather_tool.py (async-native)
+    │       │     └── await _fetch_route_weather(...)
     │       │           └── MCP weather server
     │       │                 ├── OPENWEATHERMAP_API_KEY set?
     │       │                 │     YES → asyncio.gather(
@@ -818,12 +828,10 @@ LangSmith is configured in a single place (`backend/config.py`) and activated vi
 
 ### How It Works — Implementation Detail
 
-`backend/config.py` is imported as the **first project module** in `backend/main.py`. It calls `load_dotenv()` and immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
+`backend/config.py` is imported as the **first project module** in `backend/main.py`. It loads settings from `.env` using Pydantic Settings, then immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
 
 ```python
 # backend/config.py  (runs before any langchain import)
-load_dotenv()
-
 os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
 os.environ["LANGCHAIN_API_KEY"]    = os.getenv("LANGCHAIN_API_KEY", "")
 os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
@@ -1101,23 +1109,9 @@ The system falls back to mock data automatically on any API failure, so the app 
 ### Weather card does not appear after a route query
 
 1. Confirm the query was classified as `route_query` — check the **Intent badge** in the chat. Only route queries populate `weather_data`.
-2. Confirm `nest_asyncio` is installed: `pip show nest_asyncio`. The package is required for `asyncio.run()` to work inside FastAPI's running event loop.
+2. Ensure the backend is on the latest refactor — `weather_tool.py` is async-native (no nest_asyncio needed). Restart uvicorn after upgrading.
 3. Check FastAPI logs for `Weather fetch error` — this means the OWM API call failed. The tool should fall back to mock data automatically; if you see an error card, check the `OPENWEATHERMAP_API_KEY` value in `.env`.
 4. If the card renders but shows `*(mock data)*`, add your `OPENWEATHERMAP_API_KEY` to `.env` and restart Uvicorn.
-
----
-
-### `nest_asyncio` AttributeError at startup
-
-```
-AttributeError: module 'nest_asyncio' has no attribute 'patch'
-```
-
-This error occurs with older versions of `nest_asyncio` that used `patch()` instead of `apply()`. The code uses `nest_asyncio.apply()`. Ensure you have version ≥ 1.5.9:
-
-```powershell
-pip install "nest_asyncio>=1.5.9"
-```
 
 ---
 

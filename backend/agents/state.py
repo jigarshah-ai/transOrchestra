@@ -22,3 +22,4 @@ class AgentState(TypedDict):
     thread_id: str
     route_data: Optional[Dict[str, Any]]    # populated by navigator_agent; None for all other intents
     weather_data: Optional[Dict[str, Any]]  # populated by navigator_agent via MCP weather server
+    relevance_score: Optional[float]        # populated by safety_agent when available

@@ -169,6 +169,94 @@ def render_route_map(route_data: dict) -> None:
         )
 
 
+def render_model_comparison(model_comparison: dict) -> None:
+    """Render side-by-side open vs closed model outputs."""
+    if not model_comparison:
+        return
+    open_out = model_comparison.get("open", {})
+    closed_out = model_comparison.get("closed", {})
+    if not open_out and not closed_out:
+        return
+
+    with st.expander("🧪 Open vs Closed Model Outputs"):
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown("**Open Model**")
+            st.caption(
+                f"Model: `{open_out.get('model', 'unknown')}`  ·  "
+                f"Latency: `{open_out.get('latency_ms', 0)} ms`"
+            )
+            if open_out.get("error"):
+                st.error(f"Error: {open_out['error']}")
+            else:
+                st.markdown(open_out.get("answer", "_No output_"))
+
+        with right:
+            st.markdown("**Closed Model**")
+            st.caption(
+                f"Model: `{closed_out.get('model', 'unknown')}`  ·  "
+                f"Latency: `{closed_out.get('latency_ms', 0)} ms`"
+            )
+            if closed_out.get("error"):
+                st.error(f"Error: {closed_out['error']}")
+            else:
+                st.markdown(closed_out.get("answer", "_No output_"))
+
+
+def _dot_escape(s: str) -> str:
+    """Escape double quotes and backslashes for DOT label."""
+    return (s.replace("\\", "\\\\").replace('"', '\\"') if s else "")
+
+
+def render_flow_viz(flow_data: dict) -> None:
+    """Render graph flow: nodes, edges, and highlight execution path for this request."""
+    if not flow_data:
+        return
+    nodes = flow_data.get("nodes", [])
+    edges = flow_data.get("edges", [])
+    execution_path = set(flow_data.get("execution_path", []))
+
+    if not nodes and not edges:
+        return
+
+    # Tighten layout to reduce whitespace in Streamlit's Graphviz renderer.
+    lines = [
+        "digraph G {",
+        "  rankdir=LR;",
+        "  graph [margin=0, pad=0, ranksep=0.35, nodesep=0.25];",
+        "  node [shape=box, style=rounded, margin=0.02];",
+        "  edge [fontname=\"Helvetica\", fontsize=10];",
+    ]
+    for n in nodes:
+        nid = _dot_escape(n.get("id", ""))
+        label = _dot_escape(n.get("label", nid))
+        tools = n.get("tools", [])
+        if tools:
+            tool_str = "\\n".join(_dot_escape(t) for t in tools[:2])
+            label = f"{label}\\n({tool_str})"
+        if nid in execution_path:
+            lines.append(
+                f'  "{nid}" [label="{label}", style="filled", fillcolor="#bae6fd", color="#2563eb", penwidth=1];'
+            )
+        else:
+            lines.append(f'  "{nid}" [label="{label}"];')
+    for e in edges:
+        fr = _dot_escape(e.get("from", ""))
+        to = _dot_escape(e.get("to", ""))
+        lbl = _dot_escape(e.get("label", ""))
+        if lbl:
+            lines.append(f'  "{fr}" -> "{to}" [label="{lbl}"];')
+        else:
+            lines.append(f'  "{fr}" -> "{to}";')
+    lines.append("}")
+
+    dot = "\n".join(lines)
+    with st.expander("🔄 Agent flow (this request)", expanded=True):
+        st.caption("Filled nodes = path taken for this query. Labels on edges = intent branch.")
+        st.graphviz_chart(dot, use_container_width=True)
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("📂 Document Management")
@@ -238,9 +326,13 @@ for msg in st.session_state.messages:
             # Weather card — shown alongside map for route queries
             if msg.get("weather_data"):
                 render_weather_card(msg["weather_data"])
+            if msg.get("llm_comparison"):
+                render_model_comparison(msg["llm_comparison"])
+            if msg.get("flow_data"):
+                render_flow_viz(msg["flow_data"])
 
             # Source citations
-            sources = msg.get("sources", [])
+            sources = (msg.get("sources", []) or [])[:3]
             if sources:
                 with st.expander("📄 Sources"):
                     for src in sources:
@@ -249,7 +341,7 @@ for msg in st.session_state.messages:
                         st.markdown(f"- **{filename}** — page {page}")
 
             # Status badges
-            badge_cols = st.columns([1, 1, 1, 1, 3])
+            badge_cols = st.columns([1, 1, 1, 1, 2])
             intent = msg.get("intent", "")
             if intent:
                 with badge_cols[0]:
@@ -286,12 +378,15 @@ for msg in st.session_state.messages:
                 with badge_cols[4]:
                     st.caption(f"⏱ {latency} ms")
 
-            # Model info (small caption line)
+            # Model + provider info (small caption line)
             llm_model = msg.get("llm_model")
             embed_model = msg.get("embedding_model")
+            llm_provider = msg.get("llm_provider", settings.LLM_PROVIDER)
             if llm_model or embed_model:
+                provider_label = "OpenRouter" if llm_provider == "openrouter" else "OpenAI"
                 st.caption(
-                    f"Model: `{llm_model or 'unknown'}`  ·  Embeddings: `{embed_model or 'unknown'}`"
+                    f"Model: `{llm_model or 'unknown'}`  ·  Provider: `{provider_label}`  ·  "
+                    f"Embeddings: `{embed_model or 'unknown'}`"
                 )
 
 # ── Chat input ─────────────────────────────────────────────────────────────────
@@ -330,6 +425,9 @@ if user_input:
                 relevance_score = data.get("relevance_score")
                 llm_model = data.get("llm_model")
                 embedding_model = data.get("embedding_model")
+                llm_provider = data.get("llm_provider")
+                model_comparison = data.get("llm_comparison")
+                flow_data = data.get("flow_data")
 
                 st.markdown(answer)
 
@@ -340,8 +438,13 @@ if user_input:
                 # Weather card — only rendered for route queries
                 if weather_data:
                     render_weather_card(weather_data)
+                if model_comparison:
+                    render_model_comparison(model_comparison)
+                if flow_data:
+                    render_flow_viz(flow_data)
 
                 # Source citations
+                sources = (sources or [])[:3]
                 if sources:
                     with st.expander("📄 Sources"):
                         for src in sources:
@@ -384,8 +487,10 @@ if user_input:
                         st.caption(f"⏱ {latency_ms} ms")
 
                 if llm_model or embedding_model:
+                    provider_label = "OpenRouter" if llm_provider == "openrouter" else "OpenAI"
                     st.caption(
-                        f"Model: `{llm_model or 'unknown'}`  ·  Embeddings: `{embedding_model or 'unknown'}`"
+                        f"Model: `{llm_model or 'unknown'}`  ·  Provider: `{provider_label}`  ·  "
+                        f"Embeddings: `{embedding_model or 'unknown'}`"
                     )
 
                 # Persist message with route + weather data for re-render on Streamlit rerun
@@ -402,6 +507,9 @@ if user_input:
                     "relevance_score": relevance_score,
                     "llm_model":       llm_model,
                     "embedding_model": embedding_model,
+                    "llm_provider":    llm_provider,
+                    "llm_comparison":  model_comparison,
+                    "flow_data":       flow_data,
                 })
 
             except requests.exceptions.ConnectionError:

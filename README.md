@@ -271,7 +271,15 @@ Run a query through the full multi-agent graph.
   "route_data": null,
   "weather_data": null,
   "llm_model": "gpt-4o-mini",
-  "embedding_model": "BAAI/bge-small-en-v1.5"
+  "llm_provider": "openai",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "llm_comparison": {
+    "open": {"model": "meta-llama/llama-3-8b-instruct", "latency_ms": 1437, "error": null},
+    "closed": {"model": "openai/gpt-4o-mini", "latency_ms": 980, "error": null}
+  },
+  "flow_data": {
+    "execution_path": ["__start__", "dispatcher", "safety_agent", "__end__"]
+  }
 }
 ```
 
@@ -301,7 +309,15 @@ Run a query through the full multi-agent graph.
   },
   "relevance_score": null,
   "llm_model": "gpt-4o-mini",
-  "embedding_model": "BAAI/bge-small-en-v1.5"
+  "llm_provider": "openrouter",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "llm_comparison": {
+    "open": {"model": "meta-llama/llama-3-8b-instruct", "latency_ms": 1512, "error": null},
+    "closed": {"model": "openai/gpt-4o-mini", "latency_ms": 1040, "error": null}
+  },
+  "flow_data": {
+    "execution_path": ["__start__", "dispatcher", "navigator_agent", "__end__"]
+  }
 }
 ```
 
@@ -348,7 +364,7 @@ The Dispatcher node classifies every query into one of four intents, then routes
 | `safety_query` | HazMat rules, placards, DOT compliance | Safety Agent → RAG |
 | `maintenance_query` | Brake specs, inspection requirements, DVIRs | Safety Agent → RAG |
 | `route_query` | "Route from X to Y", distance, ETA | Navigator Agent → Google Maps |
-| `general` | Anything else | Safety Agent → RAG (fallback) |
+| `general` | Anything else | Safety Agent (greeting fallback; RAG skipped, no citations) |
 
 ---
 
@@ -675,7 +691,11 @@ To make the system easy to **debug, demo, and explain in interviews**, the Strea
 | **Relevance** | `0.686` | Mean similarity score (0–1) from ChromaDB retrieval (Safety Agent only) |
 | **🌐 Web search used** | On/Off | Tavily corrective web search fired due to low relevance |
 | **Latency** | `⏱ 2341 ms` | End-to-end request latency for `/api/v1/query` |
-| **Model caption** | `Model: gpt-4o-mini · Embeddings: BAAI/bge-small-en-v1.5` | Exact LLM + embedding model used for the run |
+| **Model caption** | `Model: gpt-4o-mini · Embeddings: BAAI/bge-small-en-v1.5` | Exact LLM + embedding model used for the run (provider shown in UI caption) |
+
+Source citations policy:
+- `general` greetings/admin messages suppress citations entirely (no 📄 Sources dropdown).
+- For other intents, citations are limited to the top 3 relevant PDF pages (for readability).
 
 ### Where the UI telemetry comes from
 
@@ -686,9 +706,28 @@ The backend returns these fields on every `/api/v1/query` response:
 - `web_search_used`
 - `latency_ms`
 - `llm_model`
+- `llm_provider`
 - `embedding_model`
+- `llm_comparison` (open vs closed model outputs)
+- `flow_data` (LangGraph nodes/edges + execution_path for visualization)
 
 The Streamlit app persists them into `st.session_state.messages`, so they remain visible across reruns.
+
+### Agent flow visualization (this request)
+
+For each query, the UI renders a Graphviz diagram of the LangGraph topology and highlights the nodes taken on this request (filled blue nodes).
+
+![TransOrchestra agent flow (this request)](assets/agent-flow-viz-snapshot.png)
+
+You can see it in the expander **“🔄 Agent flow (this request)”** under each assistant message.
+
+### Open vs Closed model comparison (dual LLM)
+
+When enabled via config, the backend calls both:
+- `LLM_MODEL_OPEN` (free/open model via OpenRouter)
+- `LLM_MODEL_CLOSED` (closed model)
+
+The UI shows both outputs side-by-side in **“🧪 Open vs Closed Model Outputs”**.
 
 ---
 

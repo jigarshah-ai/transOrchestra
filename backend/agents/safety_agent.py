@@ -17,6 +17,48 @@ from backend.rag.manager import RagManager
 
 logger = logging.getLogger(__name__)
 
+def _normalize_intent(intent: str) -> str:
+    return (intent or "").strip().lower()
+
+
+def _split_pdf_and_web_sources(sources: List[dict]) -> tuple[list[dict], list[dict]]:
+    pdf_sources: list[dict] = []
+    web_sources: list[dict] = []
+    for s in sources or []:
+        filename = str((s or {}).get("filename", ""))
+        if filename.startswith("[WEB]"):
+            web_sources.append(s)
+        else:
+            pdf_sources.append(s)
+    return pdf_sources, web_sources
+
+
+def _finalize_sources(
+    *,
+    sources: List[dict],
+    intent: str,
+    relevance_score: float | None,
+    web_search_used: bool,
+) -> List[dict]:
+    """Return at most 3 citations, and suppress for irrelevant/general queries."""
+    intent_norm = _normalize_intent(intent)
+
+    # For greetings/admin/general queries, don't show citations.
+    if intent_norm == "general":
+        return []
+
+    # If we didn't do web search and relevance is low, suppress sources entirely.
+    if relevance_score is not None and relevance_score < settings.RELEVANCE_SCORE_THRESHOLD and not web_search_used:
+        return []
+
+    pdf_sources, web_sources = _split_pdf_and_web_sources(sources)
+
+    if pdf_sources:
+        return pdf_sources[:3]
+    if web_sources:
+        return web_sources[:3]
+    return []
+
 
 def _run_tavily_search(query: str) -> List[Document]:
     """Execute a Tavily web search and return results as Document objects.
@@ -52,6 +94,22 @@ async def safety_agent_node(state: AgentState) -> AgentState:
     """Run the hybrid RAG pipeline with optional corrective web search."""
     query = state.get("query", "")
     web_search_used = False
+    intent = _normalize_intent(state.get("intent", ""))
+
+    # For general greetings/admin questions, skip RAG/citations.
+    if intent == "general":
+        greeting = (
+            "Hello! I’m TransOrchestra. "
+            "How can I help with FMCSA/DOT safety, routes, or maintenance today?"
+        )
+        return {
+            **state,
+            "rag_answer": greeting,
+            "rag_sources": [],
+            "web_search_used": False,
+            "final_answer": greeting,
+            "relevance_score": None,
+        }
 
     try:
         resources = await RagManager.instance().get_resources()
@@ -105,10 +163,16 @@ async def safety_agent_node(state: AgentState) -> AgentState:
     # Run RAG — with automatic fallback to hybrid retriever if reranker fails (e.g. bad API key).
     try:
         result = await anyio.to_thread.run_sync(_run_with_retriever, retriever, chain)
+        final_sources = _finalize_sources(
+            sources=result.get("sources", []),
+            intent=intent,
+            relevance_score=relevance_score,
+            web_search_used=web_search_used,
+        )
         return {
             **state,
             "rag_answer": result["answer"],
-            "rag_sources": result["sources"],
+            "rag_sources": final_sources,
             "web_search_used": web_search_used,
             "final_answer": result["answer"],
             "relevance_score": relevance_score,
@@ -127,10 +191,16 @@ async def safety_agent_node(state: AgentState) -> AgentState:
                     _run_with_retriever, fallback_retriever, fallback_chain
                 )
                 logger.info("Fallback to hybrid retriever succeeded.")
+                final_sources = _finalize_sources(
+                    sources=result.get("sources", []),
+                    intent=intent,
+                    relevance_score=relevance_score,
+                    web_search_used=web_search_used,
+                )
                 return {
                     **state,
                     "rag_answer": result["answer"],
-                    "rag_sources": result["sources"],
+                    "rag_sources": final_sources,
                     "web_search_used": web_search_used,
                     "final_answer": result["answer"],
                     "relevance_score": relevance_score,

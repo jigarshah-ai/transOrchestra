@@ -212,7 +212,8 @@ class AgentState(TypedDict):
 
 Flow (async, production optimized):
 ```
-1. Get resources from RagManager (one-time init: embeddings + Chroma + retrievers + chains)
+1. If `intent == "general"`, skip RAG and return a greeting (no citations)
+2. Get resources from RagManager (one-time init: embeddings + Chroma + retrievers + chains)
 2. check_relevance_score(retriever, query)
    ├── score >= threshold → proceed with RAG
    └── score < threshold AND TAVILY_API_KEY set
@@ -221,6 +222,8 @@ Flow (async, production optimized):
 4. On Cohere 401/reranker failure:
    └── retry with RagManager hybrid-only retriever + chain
 5. Set state["rag_answer"], state["rag_sources"], state["web_search_used"], state["final_answer"], state["relevance_score"]
+   - `rag_sources` is limited to max 3 citations for readability
+   - low-relevance + no-web-search suppresses citations entirely
 ```
 
 Handles 3 failure modes gracefully:
@@ -476,9 +479,12 @@ Response includes `latency_ms` calculated from request start to response.
 
 Additional production telemetry fields returned for UI transparency:
 - `llm_model`
+- `llm_provider`
 - `embedding_model`
+- `llm_comparison` (open vs closed model outputs + latency + error)
 - `agent_used`
 - `relevance_score` (safety agent only)
+- `flow_data` (LangGraph nodes/edges + execution_path for visualization)
 
 Error handling: returns HTTP 500 with `{"detail": "Query processing failed: {reason}"}` on exceptions.
 
@@ -516,20 +522,22 @@ The `messages` field uses `Annotated[list, add_messages]` which applies LangGrap
 
 ### State Mutation Pattern
 
-Each node receives the full `AgentState` dict and returns a **new dict** with updated fields:
+Each node receives the full `AgentState` dict and returns a **new dict** containing only the keys it wants to update.
+
+LangGraph merges these updates into the running state. This lets some nodes return partial updates (for example, the dispatcher returns only `{"query": ..., "intent": ...}`).
 
 ```python
-return {
-    **state,           # preserve all existing fields
-    "intent": intent,  # override only what this node computed
-}
+return {"intent": intent}
 ```
-
-This ensures no node accidentally clears fields set by a previous node.
+This avoids accidental field overwrites and keeps node logic focused on only what it computes.
 
 ### Async execution
 
 All nodes are async and the graph is executed with `compiled.ainvoke(...)`. Sync-heavy calls (Google Maps client + RAG chain `.invoke`) run in worker threads to avoid blocking the FastAPI event loop.
+
+### UI flow visualization (`flow_data`)
+
+For each query, `run_graph()` also returns `flow_data` describing the LangGraph nodes/edges plus the `execution_path` taken (based on the evaluated intent). The Streamlit UI renders this via Graphviz to show exactly which agent node handled the request.
 
 ---
 

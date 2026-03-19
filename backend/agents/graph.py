@@ -1,7 +1,7 @@
 """LangGraph orchestration graph for TransOrchestra multi-agent system."""
 
 import logging
-from typing import Literal
+from typing import Any, Dict, List, Literal
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -15,15 +15,52 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ── Graph flow visualization (nodes + edges + tools per node) ───────────────────
+GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
+    {"id": "__start__", "label": "Start", "tools": []},
+    {"id": "dispatcher", "label": "Dispatcher", "tools": ["LLM (intent classification)"]},
+    {
+        "id": "safety_agent",
+        "label": "Safety Agent",
+        "tools": ["RAG (ChromaDB + BM25)", "Cohere Reranker", "Tavily (if low relevance)"],
+    },
+    {
+        "id": "navigator_agent",
+        "label": "Navigator Agent",
+        "tools": ["LLM (location extraction)", "Google Maps", "Weather (MCP)"],
+    },
+    {"id": "__end__", "label": "End", "tools": []},
+]
+
+GRAPH_FLOW_EDGES: List[Dict[str, str]] = [
+    {"from": "__start__", "to": "dispatcher", "label": ""},
+    {"from": "dispatcher", "to": "safety_agent", "label": "safety / general / maintenance"},
+    {"from": "dispatcher", "to": "navigator_agent", "label": "route_query"},
+    {"from": "safety_agent", "to": "__end__", "label": ""},
+    {"from": "navigator_agent", "to": "__end__", "label": ""},
+]
+
+
+def get_graph_flow_data() -> Dict[str, Any]:
+    """Return graph topology (nodes, edges) for UI visualization."""
+    return {"nodes": GRAPH_FLOW_NODES, "edges": GRAPH_FLOW_EDGES}
+
 
 def route_after_dispatch(
     state: AgentState,
-) -> Literal["safety_agent", "navigator_agent"]:
+) -> str:
     """Conditional edge: map classified intent to the appropriate agent node."""
-    intent = state.get("intent", "general")
+
+    intent = (state.get("intent", "general") or "").strip().lower()
+    logger.info("Routing evaluated intent as: %s", intent)
     if intent == "route_query":
         return "navigator_agent"
-    # safety_query, maintenance_query, and general all go to safety_agent.
+    if intent in ("safety_query", "maintenance_query"):
+        return "safety_agent"
+    if intent == "general":
+        # No dedicated general agent exists; fall back to safety_agent.
+        return "safety_agent"
+    # Unknown intent: end early (safer than guessing another agent).
     return "safety_agent"
 
 
@@ -42,6 +79,7 @@ def build_graph():
         {
             "safety_agent": "safety_agent",
             "navigator_agent": "navigator_agent",
+            END: END,
         },
     )
     graph.add_edge("safety_agent", END)
@@ -89,8 +127,20 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
 
     try:
         final_state = await compiled.ainvoke(initial_state, config=config)
-        intent = final_state.get("intent", "unknown")
-        agent_used = "navigator_agent" if intent == "route_query" else "safety_agent"
+        intent = (final_state.get("intent", "general") or "").strip().lower()
+        if intent == "route_query":
+            agent_used = "navigator_agent"
+            execution_path: List[str] = ["__start__", "dispatcher", "navigator_agent", "__end__"]
+        elif intent in ("safety_query", "maintenance_query"):
+            agent_used = "safety_agent"
+            execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
+        elif intent == "general":
+            agent_used = "safety_agent"
+            execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
+        else:
+            agent_used = "safety_agent"
+            execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
+
         return {
             "answer":          final_state.get("final_answer", "No answer generated."),
             "sources":         final_state.get("rag_sources", []),
@@ -102,6 +152,11 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
             "relevance_score": final_state.get("relevance_score"),
             "llm_model":       settings.LLM_MODEL,
             "embedding_model": settings.EMBEDDING_MODEL,
+            "llm_provider":    settings.LLM_PROVIDER,
+            "flow_data":       {
+                **get_graph_flow_data(),
+                "execution_path": execution_path,
+            },
         }
     except Exception as exc:
         logger.error("Graph execution failed for thread '%s': %s", thread_id, exc)

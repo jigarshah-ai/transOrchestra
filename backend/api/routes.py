@@ -1,17 +1,20 @@
 """FastAPI route definitions for the TransOrchestra API."""
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from backend.agents.graph import run_graph
 from backend.config import settings
 from backend.rag.embeddings import get_embedding_model
 from backend.rag.loader import load_and_chunk_pdfs, load_single_pdf
+from backend.rag.llm_factory import build_chat_llm
 from backend.rag.vectorstore import build_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,9 @@ class QueryResponse(BaseModel):
     relevance_score: Optional[float] = None
     llm_model: str
     embedding_model: str
+    llm_provider: str
+    llm_comparison: Optional[Dict[str, Any]] = None
+    flow_data: Optional[Dict[str, Any]] = None
 
 
 class IngestRequest(BaseModel):
@@ -59,6 +65,46 @@ class HealthResponse(BaseModel):
     model: str
 
 
+async def _invoke_model_for_compare(query: str, model_name: str) -> Dict[str, Any]:
+    """Invoke one model for side-by-side comparison with latency + error capture."""
+    start = int(time.time() * 1000)
+    try:
+        llm = build_chat_llm(model=model_name)
+        resp = await llm.ainvoke(
+            [
+                HumanMessage(
+                    content=(
+                        "Answer the user's logistics/safety question in 3-5 lines, "
+                        "focused on practical guidance.\n\n"
+                        f"Question: {query}"
+                    )
+                )
+            ]
+        )
+        text = resp.content if hasattr(resp, "content") else str(resp)
+        return {
+            "model": model_name,
+            "answer": text,
+            "latency_ms": int(time.time() * 1000) - start,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "model": model_name,
+            "answer": "",
+            "latency_ms": int(time.time() * 1000) - start,
+            "error": str(exc),
+        }
+
+
+async def _compare_open_closed_models(query: str) -> Dict[str, Any]:
+    """Run both LLM_MODEL_OPEN and LLM_MODEL_CLOSED in parallel."""
+    open_task = _invoke_model_for_compare(query, settings.LLM_MODEL_OPEN)
+    closed_task = _invoke_model_for_compare(query, settings.LLM_MODEL_CLOSED)
+    open_out, closed_out = await asyncio.gather(open_task, closed_task)
+    return {"open": open_out, "closed": closed_out}
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.post("/query", response_model=QueryResponse)
@@ -67,6 +113,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     start_ms = int(time.time() * 1000)
     try:
         result = await run_graph(request.query, thread_id=request.thread_id)
+        comparison = await _compare_open_closed_models(request.query)
         latency_ms = int(time.time() * 1000) - start_ms
         return QueryResponse(
             answer=result["answer"],
@@ -80,6 +127,9 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             relevance_score=result.get("relevance_score"),
             llm_model=result.get("llm_model", settings.LLM_MODEL),
             embedding_model=result.get("embedding_model", settings.EMBEDDING_MODEL),
+            llm_provider=result.get("llm_provider", settings.LLM_PROVIDER),
+            llm_comparison=comparison,
+            flow_data=result.get("flow_data"),
         )
     except Exception as exc:
         logger.error("/query endpoint error: %s", exc)

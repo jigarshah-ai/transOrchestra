@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "transOrchestra"
     LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
 
+
+    OPENROUTER_API_KEY: str = Field(default="", description="OpenRouter API key (required when LLM_PROVIDER=openrouter).")
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LLM_PROVIDER: Literal["openai", "openrouter"] = "openai"
+    LLM_MODEL_CLOSED: str = "openai/gpt-4o-mini"
+    LLM_MODEL_OPEN: str = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+
     @field_validator("CHROMA_PERSIST_DIR", mode="before")
     @classmethod
     def _coerce_path(cls, v):
@@ -134,6 +142,8 @@ def _warn_optional_keys(s: Settings) -> None:
         logger.warning("GOOGLE_MAPS_API_KEY not set — Navigator uses realistic mock route data.")
     if not s.OPENWEATHERMAP_API_KEY:
         logger.warning("OPENWEATHERMAP_API_KEY not set — weather tool will return mock data.")
+    if s.LLM_PROVIDER == "openrouter" and not (s.OPENROUTER_API_KEY or "").strip():
+        logger.warning("LLM_PROVIDER=openrouter but OPENROUTER_API_KEY not set — LLM calls may fail.")
 
 
 # Singleton settings object used across the codebase.

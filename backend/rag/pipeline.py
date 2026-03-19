@@ -39,14 +39,9 @@ def _format_docs(docs: List[Document]) -> str:
 def build_rag_chain(retriever: BaseRetriever):
     """Build and return the full RAG chain: retrieve → format → prompt → LLM → parse."""
     try:
-        from langchain_openai import ChatOpenAI
+        from backend.rag.llm_factory import build_chat_llm
 
-        llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            temperature=0,
-            streaming=False,
-            openai_api_key=settings.OPENAI_API_KEY,
-        )
+        llm = build_chat_llm(streaming=False)
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -130,14 +125,9 @@ def run_query_with_web_context(
     Tavily content was previously prepended to the query string and lost.
     """
     try:
-        from langchain_openai import ChatOpenAI
+        from backend.rag.llm_factory import build_chat_llm
 
-        llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            temperature=0,
-            streaming=False,
-            openai_api_key=settings.OPENAI_API_KEY,
-        )
+        llm = build_chat_llm(streaming=False)
 
         # Retrieve ChromaDB docs using the clean original query.
         try:

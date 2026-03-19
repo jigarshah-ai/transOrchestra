@@ -8,9 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from langchain_openai import ChatOpenAI
-
 from backend.config import settings
+from backend.rag.llm_factory import build_chat_llm
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +37,7 @@ class LocationInfo(BaseModel):
 
 async def extract_locations(query: str) -> LocationInfo:
     """Extract origin and destination from a route query using structured output."""
-    llm = ChatOpenAI(
-        model=settings.LLM_MODEL,
-        temperature=0,
-        openai_api_key=settings.OPENAI_API_KEY,
-    ).with_structured_output(LocationInfo)
+    llm = build_chat_llm().with_structured_output(LocationInfo)
 
     prompt = (
         "You are a location extractor for a logistics routing system.\n"

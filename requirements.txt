@@ -11,6 +11,7 @@ sentence-transformers==3.0.1
 rank-bm25==0.2.2
 langgraph==0.2.14
 streamlit==1.37.1
+graphviz>=0.19.0
 ragas==0.1.21
 python-dotenv==1.0.1
 langsmith>=0.1.112,<0.2.0

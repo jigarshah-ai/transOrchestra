@@ -577,7 +577,7 @@ python eval/run_ragas.py --compare
 |---|---|---|
 | Vector only | TBD | TBD |
 | Hybrid (BM25 + Vector) | TBD | TBD |
-| Hybrid + Reranker | TBD | TBD |
+| Hybrid + Reranker | 0.7319 | 0.9294 |
 
 *Run `python eval/run_ragas.py --compare` after ingesting documents to populate this table.*
 

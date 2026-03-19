@@ -1040,6 +1040,14 @@ Typical causes of low answer relevancy:
 
 ---
 
+## Ragas Results Snapshot
+
+Latest Ragas evaluation on the current `eval/eval_set.json`:
+
+| Retriever Strategy | Faithfulness | Answer Relevancy |
+|---|---:|---:|
+| Hybrid + Reranker | 0.7319 | 0.9294 |
+
 ## 14. Troubleshooting
 
 ### `chroma-hnswlib` build error on Windows

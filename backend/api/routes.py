@@ -27,6 +27,7 @@ class QueryRequest(BaseModel):
     """Payload for the /query endpoint."""
     query: str
     thread_id: str = "default"
+    image_base64: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -45,6 +46,7 @@ class QueryResponse(BaseModel):
     llm_provider: str
     llm_comparison: Optional[Dict[str, Any]] = None
     flow_data: Optional[Dict[str, Any]] = None
+    extracted_doc_data: Optional[Dict[str, Any]] = None
 
 
 class IngestRequest(BaseModel):
@@ -112,7 +114,11 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     """Run *request.query* through the full multi-agent graph and return the result."""
     start_ms = int(time.time() * 1000)
     try:
-        result = await run_graph(request.query, thread_id=request.thread_id)
+        result = await run_graph(
+            request.query,
+            thread_id=request.thread_id,
+            image_base64=request.image_base64,
+        )
         comparison = await _compare_open_closed_models(request.query)
         latency_ms = int(time.time() * 1000) - start_ms
         return QueryResponse(
@@ -130,6 +136,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
             llm_provider=result.get("llm_provider", settings.LLM_PROVIDER),
             llm_comparison=comparison,
             flow_data=result.get("flow_data"),
+            extracted_doc_data=result.get("extracted_doc_data"),
         )
     except Exception as exc:
         logger.error("/query endpoint error: %s", exc)

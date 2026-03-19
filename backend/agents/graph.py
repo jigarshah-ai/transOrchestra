@@ -8,6 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from backend.agents.dispatcher import dispatcher_node
+from backend.agents.document_agent import document_agent_node
 from backend.agents.navigator_agent import navigator_agent_node
 from backend.agents.safety_agent import safety_agent_node
 from backend.agents.state import AgentState
@@ -25,6 +26,11 @@ GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
         "tools": ["RAG (ChromaDB + BM25)", "Cohere Reranker", "Tavily (if low relevance)"],
     },
     {
+        "id": "document_agent",
+        "label": "Document Clerk",
+        "tools": ["gpt-4o vision", "Structured extraction"],
+    },
+    {
         "id": "navigator_agent",
         "label": "Navigator Agent",
         "tools": ["LLM (location extraction)", "Google Maps", "Weather (MCP)"],
@@ -35,8 +41,10 @@ GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
 GRAPH_FLOW_EDGES: List[Dict[str, str]] = [
     {"from": "__start__", "to": "dispatcher", "label": ""},
     {"from": "dispatcher", "to": "safety_agent", "label": "safety / general / maintenance"},
+    {"from": "dispatcher", "to": "document_agent", "label": "document_processing"},
     {"from": "dispatcher", "to": "navigator_agent", "label": "route_query"},
     {"from": "safety_agent", "to": "__end__", "label": ""},
+    {"from": "document_agent", "to": "__end__", "label": ""},
     {"from": "navigator_agent", "to": "__end__", "label": ""},
 ]
 
@@ -57,6 +65,8 @@ def route_after_dispatch(
         return "navigator_agent"
     if intent in ("safety_query", "maintenance_query"):
         return "safety_agent"
+    if intent == "document_processing":
+        return "document_agent"
     if intent == "general":
         # No dedicated general agent exists; fall back to safety_agent.
         return "safety_agent"
@@ -70,6 +80,7 @@ def build_graph():
 
     graph.add_node("dispatcher", dispatcher_node)
     graph.add_node("safety_agent", safety_agent_node)
+    graph.add_node("document_agent", document_agent_node)
     graph.add_node("navigator_agent", navigator_agent_node)
 
     graph.add_edge(START, "dispatcher")
@@ -79,10 +90,12 @@ def build_graph():
         {
             "safety_agent": "safety_agent",
             "navigator_agent": "navigator_agent",
+            "document_agent": "document_agent",
             END: END,
         },
     )
     graph.add_edge("safety_agent", END)
+    graph.add_edge("document_agent", END)
     graph.add_edge("navigator_agent", END)
 
     checkpointer = MemorySaver()
@@ -103,7 +116,7 @@ def _get_graph():
     return _graph
 
 
-async def run_graph(query: str, thread_id: str = "default") -> dict:
+async def run_graph(query: str, thread_id: str = "default", image_base64: str | None = None) -> dict:
     """Invoke the full multi-agent graph for *query* and return a structured result dict."""
     compiled = _get_graph()
     config = {"configurable": {"thread_id": thread_id}}
@@ -111,6 +124,7 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
     initial_state: AgentState = {
         "messages": [HumanMessage(content=query)],
         "query": query,
+        "image_data": image_base64,
         "intent": "",
         "vehicle_id": "",
         "cargo_type": "",
@@ -119,6 +133,7 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
         "rag_sources": [],
         "web_search_used": False,
         "final_answer": "",
+        "extracted_doc_data": None,
         "thread_id": thread_id,
         "route_data":   None,
         "weather_data": None,
@@ -131,6 +146,9 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
         if intent == "route_query":
             agent_used = "navigator_agent"
             execution_path: List[str] = ["__start__", "dispatcher", "navigator_agent", "__end__"]
+        elif intent == "document_processing":
+            agent_used = "document_agent"
+            execution_path = ["__start__", "dispatcher", "document_agent", "__end__"]
         elif intent in ("safety_query", "maintenance_query"):
             agent_used = "safety_agent"
             execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
@@ -150,6 +168,7 @@ async def run_graph(query: str, thread_id: str = "default") -> dict:
             "route_data":      final_state.get("route_data"),
             "weather_data":    final_state.get("weather_data"),
             "relevance_score": final_state.get("relevance_score"),
+            "extracted_doc_data": final_state.get("extracted_doc_data"),
             "llm_model":       settings.LLM_MODEL,
             "embedding_model": settings.EMBEDDING_MODEL,
             "llm_provider":    settings.LLM_PROVIDER,

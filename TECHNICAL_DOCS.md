@@ -173,6 +173,7 @@ System prompt enforces:
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]  # LangGraph message history
     query: str                                # current user query
+    image_data: Optional[str]                # base64-encoded image for document processing
     intent: str                               # dispatcher output
     vehicle_id: str                           # optional conversation context
     cargo_type: str                           # optional conversation context
@@ -181,6 +182,7 @@ class AgentState(TypedDict):
     rag_sources: list                         # source citations
     web_search_used: bool                     # Tavily was triggered
     final_answer: str                         # final response to user
+    extracted_doc_data: Optional[dict]      # structured extraction result for document_processing
     thread_id: str                            # MemorySaver thread key
     route_data: Optional[dict]                # navigator_agent route + polyline; None for all other intents
     weather_data: Optional[dict]              # MCP weather server result; None for non-route intents
@@ -194,14 +196,16 @@ class AgentState(TypedDict):
 **`dispatcher_node(state: AgentState) → AgentState`** *(async)*
 
 - Extracts last `HumanMessage` from `state["messages"]`
+- If `state.get("image_data")` is present, bypasses intent classification and hard-sets:
+  - `state["intent"] = "document_processing"` (routes to `document_agent`)
 - Calls `ChatOpenAI` with classification prompt using `await llm.ainvoke(...)`:
   ```
   Classify this logistics query into exactly one category.
   Return only the category name, nothing else.
-  Categories: safety_query, route_query, maintenance_query, general
+  Categories: safety_query, route_query, maintenance_query, document_processing, general
   Query: {query}
   ```
-- Validates response is one of the 4 categories (defaults to `general` if not)
+- Validates response is one of the categories (defaults to `general` if not)
 - Sets `state["intent"]`
 
 ---
@@ -260,6 +264,37 @@ Sets four state fields:
 
 ---
 
+### `backend/agents/document_agent.py`
+
+**`document_agent_node(state: AgentState) → dict`**
+
+Vision-based "Intelligent Document Clerk" that extracts structured logistics fields from an uploaded image (BOL/receipt).
+
+Workflow:
+```
+1. If state["image_data"] is missing:
+   → returns extracted_doc_data=None and a helpful final_answer.
+2. Creates `ChatOpenAI(model="gpt-4o", temperature=0)` with `.with_structured_output(DocumentExtraction)`
+3. Sends a vision message:
+   - text prompt: "Extract logistics data from this image"
+   - image_url: {"url": "data:image/jpeg;base64,<...>"}
+4. Returns:
+   - extracted_doc_data = parsed structured fields
+   - final_answer = friendly summary
+
+Note: the Streamlit frontend uses a consume-once pattern for the uploaded image (after the first successful extraction, it clears `image_base64` so later queries don't get forced into document_processing).
+```
+
+Output model `DocumentExtraction` fields:
+- `document_type` (str)
+- `origin` (str)
+- `destination` (str)
+- `weight` (str)
+- `freight_class` (str)
+- `summary` (str)
+
+---
+
 ### `backend/agents/graph.py`
 
 **`build_graph() → CompiledGraph`**
@@ -268,14 +303,17 @@ Sets four state fields:
 graph = StateGraph(AgentState)
 graph.add_node("dispatcher", dispatcher_node)
 graph.add_node("safety_agent", safety_agent_node)
+graph.add_node("document_agent", document_agent_node)
 graph.add_node("navigator_agent", navigator_agent_node)
 
 graph.add_edge(START, "dispatcher")
 graph.add_conditional_edges("dispatcher", route_after_dispatch, {
     "safety_agent": "safety_agent",
     "navigator_agent": "navigator_agent",
+    "document_agent": "document_agent",
 })
 graph.add_edge("safety_agent", END)
+graph.add_edge("document_agent", END)
 graph.add_edge("navigator_agent", END)
 
 return graph.compile(checkpointer=MemorySaver())
@@ -283,13 +321,16 @@ return graph.compile(checkpointer=MemorySaver())
 
 Routing function `route_after_dispatch`:
 - `"route_query"` → `"navigator_agent"`
-- Everything else → `"safety_agent"`
+- `"safety_query"` and `"maintenance_query"` → `"safety_agent"`
+- `"document_processing"` → `"document_agent"`
+- `"general"` → `"safety_agent"` (greeting fallback)
 
-**`run_graph(query, thread_id="default") → dict`**
-- Builds initial `AgentState` with `HumanMessage(query)`
+**`run_graph(query, thread_id="default", image_base64=None) → dict`**
+- Builds initial `AgentState` with `HumanMessage(query)` and `image_data=image_base64`
 - Invokes with `{"configurable": {"thread_id": thread_id}}`
 - `MemorySaver` persists message history per thread_id
 - Returns `{"answer", "sources", "intent", "agent_used", "web_search_used", "route_data", "weather_data", "relevance_score", "llm_model", "embedding_model"}`
+- and (when applicable) `extracted_doc_data` + `flow_data`
 
 ---
 
@@ -474,6 +515,7 @@ All routes are mounted at `/api/v1/` by `backend/main.py`.
 |---|---|---|
 | `query` | str | The user's question |
 | `thread_id` | str | Conversation thread ID for memory persistence (default: "default") |
+| `image_base64` | Optional[str] | Base64-encoded image for document extraction (BOL/receipt). When present, dispatcher routes to `document_agent`. |
 
 Response includes `latency_ms` calculated from request start to response.
 
@@ -485,6 +527,7 @@ Additional production telemetry fields returned for UI transparency:
 - `agent_used`
 - `relevance_score` (safety agent only)
 - `flow_data` (LangGraph nodes/edges + execution_path for visualization)
+- `extracted_doc_data` (document_processing only)
 
 Error handling: returns HTTP 500 with `{"detail": "Query processing failed: {reason}"}` on exceptions.
 

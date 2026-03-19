@@ -1,5 +1,7 @@
 """TransOrchestra Streamlit frontend — Logistics Control Tower."""
 
+import base64
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -220,20 +222,21 @@ def render_flow_viz(flow_data: dict) -> None:
     if not nodes and not edges:
         return
 
-    # Tighten layout to reduce whitespace in Streamlit's Graphviz renderer.
+    # Tighten layout to reduce size in Streamlit's Graphviz renderer.
     lines = [
         "digraph G {",
         "  rankdir=LR;",
-        "  graph [margin=0, pad=0, ranksep=0.35, nodesep=0.25];",
-        "  node [shape=box, style=rounded, margin=0.02];",
-        "  edge [fontname=\"Helvetica\", fontsize=10];",
+        "  graph [margin=0, pad=0, ranksep=0.2, nodesep=0.2];",
+        "  node [shape=box, style=rounded, margin=0.01, fontsize=9, fontname=\"Helvetica\"];",
+        "  edge [fontname=\"Helvetica\", fontsize=9];",
     ]
     for n in nodes:
         nid = _dot_escape(n.get("id", ""))
         label = _dot_escape(n.get("label", nid))
         tools = n.get("tools", [])
         if tools:
-            tool_str = "\\n".join(_dot_escape(t) for t in tools[:2])
+            # Keep the diagram compact by showing at most 1 tool hint per node.
+            tool_str = "\\n".join(_dot_escape(t) for t in tools[:1])
             label = f"{label}\\n({tool_str})"
         if nid in execution_path:
             lines.append(
@@ -301,9 +304,49 @@ with st.sidebar:
     st.caption("**Vector store:** ChromaDB (local)")
 
     st.divider()
+    st.header("📷 Intelligent Document Clerk (Image)")
+    doc_image = st.file_uploader(
+        "Upload BOL / receipt image (PNG/JPG/JPEG)",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=False,
+        help="When you upload an image, the backend will extract structured logistics fields using gpt-4o vision.",
+    )
+    if doc_image:
+        image_bytes = doc_image.getvalue()
+        st.session_state.image_filename = getattr(doc_image, "name", "uploaded_image")
+        st.session_state.image_bytes_preview = image_bytes
+
+        image_sha = hashlib.sha256(image_bytes).hexdigest()
+        prev_sha = st.session_state.get("image_sha256")
+        if prev_sha != image_sha:
+            # New upload: enable extraction for the next query.
+            st.session_state.image_sha256 = image_sha
+            st.session_state.image_ready_for_extraction = True
+
+        if st.session_state.get("image_ready_for_extraction", False):
+            st.session_state.image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        else:
+            # After extraction, consume the image so future queries route normally.
+            st.session_state.image_base64 = None
+        # Streamlit uses `use_column_width` for images (older versions don't support `use_container_width`)
+        st.image(image_bytes, caption=st.session_state.image_filename, use_column_width=True)
+        st.caption("Image ready for extraction — ask your question below.")
+    else:
+        # Keep any previously uploaded image in session unless user clears the conversation.
+        st.session_state.setdefault("image_base64", None)
+        st.session_state.setdefault("image_bytes_preview", None)
+        st.session_state.setdefault("image_ready_for_extraction", False)
+        st.session_state.setdefault("image_sha256", None)
+
+    st.divider()
     if st.button("🗑️ Clear Conversation"):
         st.session_state.messages = []
         st.session_state.thread_id = str(uuid4())
+        st.session_state.image_base64 = None
+        st.session_state.image_filename = None
+        st.session_state.image_bytes_preview = None
+        st.session_state.image_ready_for_extraction = False
+        st.session_state.image_sha256 = None
         st.rerun()
 
 # ── Main area header ───────────────────────────────────────────────────────────
@@ -312,6 +355,12 @@ st.subheader(
     "Ask about FMCSA regulations, routes, HazMat compliance, vehicle maintenance"
 )
 st.divider()
+
+# If an image was uploaded in the sidebar, show a small preview in the chat area too.
+if st.session_state.get("image_bytes_preview"):
+    fname = st.session_state.get("image_filename", "uploaded_image")
+    st.caption(f"📷 Document attached: {fname} (will be extracted on your next message)")
+    st.image(st.session_state["image_bytes_preview"], caption="Uploaded document preview", width=220)
 
 # ── Render chat history ────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
@@ -330,6 +379,9 @@ for msg in st.session_state.messages:
                 render_model_comparison(msg["llm_comparison"])
             if msg.get("flow_data"):
                 render_flow_viz(msg["flow_data"])
+            if msg.get("extracted_doc_data"):
+                with st.expander("📑 Extracted Document Data"):
+                    st.json(msg["extracted_doc_data"])
 
             # Source citations
             sources = (msg.get("sources", []) or [])[:3]
@@ -408,6 +460,7 @@ if user_input:
                     json={
                         "query": user_input,
                         "thread_id": st.session_state.thread_id,
+                        "image_base64": st.session_state.get("image_base64"),
                     },
                     timeout=120,
                 )
@@ -428,6 +481,7 @@ if user_input:
                 llm_provider = data.get("llm_provider")
                 model_comparison = data.get("llm_comparison")
                 flow_data = data.get("flow_data")
+                extracted_doc_data = data.get("extracted_doc_data")
 
                 st.markdown(answer)
 
@@ -442,6 +496,13 @@ if user_input:
                     render_model_comparison(model_comparison)
                 if flow_data:
                     render_flow_viz(flow_data)
+                if extracted_doc_data:
+                    with st.expander("📑 Extracted Document Data"):
+                        st.json(extracted_doc_data)
+                    # Consume-once: after successful extraction, don't route future queries to document_agent
+                    # unless the user uploads a new image.
+                    st.session_state.image_base64 = None
+                    st.session_state.image_ready_for_extraction = False
 
                 # Source citations
                 sources = (sources or [])[:3]
@@ -509,6 +570,7 @@ if user_input:
                     "embedding_model": embedding_model,
                     "llm_provider":    llm_provider,
                     "llm_comparison":  model_comparison,
+                    "extracted_doc_data": extracted_doc_data,
                     "flow_data":       flow_data,
                 })
 

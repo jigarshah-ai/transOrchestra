@@ -18,6 +18,7 @@ class IntentCategory(str, Enum):
     ROUTE = "route_query"
     MAINTENANCE = "maintenance_query"
     GENERAL = "general"
+    DOCUMENT = "document_processing"
 
 # 2. The LLM reads these descriptions to understand the nuance
 class IntentClassification(BaseModel):
@@ -27,6 +28,7 @@ class IntentClassification(BaseModel):
             "- safety_query: DOT laws, regulations, compliance, hours of service.\n"
             "- route_query: Map directions, live traffic, travel time, weather delays, locations.\n"
             "- maintenance_query: Truck repairs, engine fault codes, tire pressure, mechanical.\n"
+            "- document_processing: Use when the user uploads an image, document, receipt, or Bill of Lading for processing.\n"
             "- general: Greetings, HR, administrative questions."
         )
     )
@@ -34,22 +36,25 @@ class IntentClassification(BaseModel):
 async def dispatcher_node(state: AgentState) -> AgentState:
     """Extract the last user message, classify intent using structured output, and update state."""
     try:
-        # Initialize the LLM
-        llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            temperature=0,
-            openai_api_key=settings.OPENAI_API_KEY,
-        )
-        
-        # Force structured JSON output
-        structured_llm = llm.with_structured_output(IntentClassification)
-
         messages = state.get("messages", [])
         if messages:
             last_msg = messages[-1]
             query = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
         else:
             query = state.get("query", "")
+
+        # If an image is present, bypass LLM intent classification completely.
+        if state.get("image_data"):
+            logger.info("Dispatcher detected image upload — routing to document_agent.")
+            return {"query": query, "intent": "document_processing"}
+
+        # Initialize the LLM (intent classification only; skipped for document processing).
+        llm = ChatOpenAI(
+            model=settings.LLM_MODEL,
+            temperature=0,
+            openai_api_key=settings.OPENAI_API_KEY,
+        )
+        structured_llm = llm.with_structured_output(IntentClassification)
 
         # Simple prompt (the descriptions above do the heavy work)
         prompt = f"Classify this logistics query: '{query}'"

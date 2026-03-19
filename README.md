@@ -357,14 +357,29 @@ Liveness check.
 
 ## Agent Routing Logic
 
-The Dispatcher node classifies every query into one of four intents, then routes it:
+The Dispatcher node classifies every query into one of the following intents, then routes it:
 
 | Intent | Trigger Examples | Routed To |
 |---|---|---|
 | `safety_query` | HazMat rules, placards, DOT compliance | Safety Agent → RAG |
 | `maintenance_query` | Brake specs, inspection requirements, DVIRs | Safety Agent → RAG |
 | `route_query` | "Route from X to Y", distance, ETA | Navigator Agent → Google Maps |
+| `document_processing` | When `image_data` is present (uploaded BOL/receipt) | Document Clerk (vision extraction) |
 | `general` | Anything else | Safety Agent (greeting fallback; RAG skipped, no citations) |
+
+---
+
+## Intelligent Document Clerk (Multimodal Vision)
+
+Upload a BOL/receipt image in the sidebar, then send your question.
+
+The UI sends the image as `image_base64` to `/api/v1/query`, and the backend routes the request to the `document_agent` (vision + structured extraction). The extracted fields are returned as `extracted_doc_data` and displayed in Streamlit under the expander **"Extracted Document Data"**.
+
+After a successful extraction, the frontend consumes the image once (sets `image_base64=None`), so the next “normal” question routes back to safety/route agents unless you upload a new image.
+
+### Screenshot (example output)
+
+![Intelligent Document Clerk output](assets/document-clerk-output-snapshot.png)
 
 ---
 

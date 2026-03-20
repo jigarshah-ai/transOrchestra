@@ -1,4 +1,18 @@
-"""FastAPI route definitions for the TransOrchestra API."""
+"""FastAPI route definitions for the TransOrchestra control-plane API.
+
+Exposes JSON endpoints consumed by the Streamlit frontend and automation:
+
+    - ``POST /query`` — Runs the LangGraph multi-agent system (dispatcher →
+      specialized agents), then **additionally** invokes two comparison LLMs
+      (``LLM_MODEL_OPEN`` / ``LLM_MODEL_CLOSED``) in parallel for portfolio-style
+      observability. The graph answer remains the primary user-facing response.
+    - ``POST /ingest`` — Chunks PDFs on disk paths provided by the client and
+      rebuilds the Chroma collection used by RAG.
+    - ``GET /health`` — Lightweight liveness for orchestrators.
+
+The router assumes ``backend.main`` mounts it under a versioned prefix (e.g.
+``/api/v1``).
+"""
 
 import asyncio
 import logging
@@ -24,14 +38,41 @@ router = APIRouter()
 # ── Request / Response schemas ─────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
-    """Payload for the /query endpoint."""
+    """Payload for the ``/query`` endpoint.
+
+    Attributes:
+        query: Natural language user message.
+        thread_id: LangGraph checkpointer thread key for conversational memory.
+        image_base64: Optional document image; when set, dispatcher forces
+            ``document_processing`` until the client clears it.
+    """
+
     query: str
     thread_id: str = "default"
     image_base64: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
-    """Response shape returned by the /query endpoint."""
+    """Structured response for ``/query`` including telemetry for the UI.
+
+    Attributes:
+        answer: Primary assistant answer from LangGraph's ``final_answer``.
+        sources: Attributed citations (already capped/filtered server-side).
+        intent: Normalized dispatcher intent string.
+        agent_used: Which specialized node produced the answer.
+        web_search_used: Whether Tavily augmented context.
+        latency_ms: End-to-end handler latency including comparison LLMs.
+        route_data: Present for navigator intents (map rendering).
+        weather_data: Parallel weather summary for routes.
+        relevance_score: Retrieval confidence from the safety agent when set.
+        llm_model: Active primary model label from settings snapshot.
+        embedding_model: Active embedding model label.
+        llm_provider: ``openrouter`` vs ``openai`` discriminator.
+        llm_comparison: Side-by-side outputs from open/closed comparison models.
+        flow_data: Static topology + ``execution_path`` for Graphviz UI.
+        extracted_doc_data: Structured vision extraction payload when applicable.
+    """
+
     answer: str
     sources: list
     intent: str
@@ -50,25 +91,58 @@ class QueryResponse(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    """Payload for the /ingest endpoint."""
+    """Payload for the ``/ingest`` endpoint.
+
+    Attributes:
+        pdf_paths: Absolute or relative paths readable by the API process.
+    """
+
     pdf_paths: List[str]
 
 
 class IngestResponse(BaseModel):
-    """Response shape returned by the /ingest endpoint."""
+    """Acknowledgement and chunk counts after ingestion.
+
+    Attributes:
+        status: Human-readable status token (``success`` on happy path).
+        chunks_created: Number of LangChain ``Document`` chunks embedded.
+    """
+
     status: str
     chunks_created: int
 
 
 class HealthResponse(BaseModel):
-    """Response shape returned by the /health endpoint."""
+    """Minimal health probe response.
+
+    Attributes:
+        status: Liveness token.
+        version: Static API version label.
+        model: Primary LLM model name from settings (for quick sanity checks).
+    """
+
     status: str
     version: str
     model: str
 
 
 async def _invoke_model_for_compare(query: str, model_name: str) -> Dict[str, Any]:
-    """Invoke one model for side-by-side comparison with latency + error capture."""
+    """Run a **standalone** chat completion for benchmarking, not the graph answer.
+
+    Uses ``build_chat_llm`` so OpenRouter vs OpenAI routing matches the rest of
+    the codebase. Failures are captured per-model so one bad endpoint does not
+    break the primary ``run_graph`` response.
+
+    Args:
+        query: Original user question for the comparison prompt.
+        model_name: Explicit OpenRouter/OpenAI model id override.
+
+    Returns:
+        dict: Keys ``model``, ``answer``, ``latency_ms``, ``error`` (``None`` on success).
+
+    Raises:
+        None: Exceptions are converted into the ``error`` field.
+    """
     start = int(time.time() * 1000)
     try:
         llm = build_chat_llm(model=model_name)
@@ -100,7 +174,18 @@ async def _invoke_model_for_compare(query: str, model_name: str) -> Dict[str, An
 
 
 async def _compare_open_closed_models(query: str) -> Dict[str, Any]:
-    """Run both LLM_MODEL_OPEN and LLM_MODEL_CLOSED in parallel."""
+    """Fan out to open and closed comparison models via ``asyncio.gather``.
+
+    Args:
+        query: User text for both completions.
+
+    Returns:
+        dict: ``{"open": {...}, "closed": {...}}`` structures from
+        ``_invoke_model_for_compare``.
+
+    Raises:
+        None: Individual model errors are stored inside each sub-dict.
+    """
     open_task = _invoke_model_for_compare(query, settings.LLM_MODEL_OPEN)
     closed_task = _invoke_model_for_compare(query, settings.LLM_MODEL_CLOSED)
     open_out, closed_out = await asyncio.gather(open_task, closed_task)
@@ -111,7 +196,17 @@ async def _compare_open_closed_models(query: str) -> Dict[str, Any]:
 
 @router.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest) -> QueryResponse:
-    """Run *request.query* through the full multi-agent graph and return the result."""
+    """Execute LangGraph and attach dual-model comparison metadata.
+
+    Args:
+        request: Validated ``QueryRequest`` instance from the client.
+
+    Returns:
+        QueryResponse: Answer + citations + telemetry + ``llm_comparison``.
+
+    Raises:
+        HTTPException: 500 when ``run_graph`` or response assembly fails.
+    """
     start_ms = int(time.time() * 1000)
     try:
         result = await run_graph(
@@ -145,7 +240,17 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
 
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_endpoint(request: IngestRequest) -> IngestResponse:
-    """Ingest a list of PDF file paths, chunk them, and add to the vector store."""
+    """Chunk PDFs from disk paths and rebuild the persisted Chroma index.
+
+    Args:
+        request: Paths previously saved by the Streamlit uploader or CI jobs.
+
+    Returns:
+        IngestResponse: Status + chunk count.
+
+    Raises:
+        HTTPException: 400 when no readable PDFs remain; 500 on unexpected errors.
+    """
     try:
         all_docs = []
         for path in request.pdf_paths:
@@ -174,5 +279,12 @@ async def ingest_endpoint(request: IngestRequest) -> IngestResponse:
 
 @router.get("/health", response_model=HealthResponse)
 async def health_endpoint() -> HealthResponse:
-    """Simple liveness check."""
+    """Return service liveness and configured primary LLM name.
+
+    Returns:
+        HealthResponse: Static version plus ``settings.LLM_MODEL``.
+
+    Raises:
+        None
+    """
     return HealthResponse(status="ok", version="1.0.0", model=settings.LLM_MODEL)

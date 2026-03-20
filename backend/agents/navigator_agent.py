@@ -1,4 +1,9 @@
-"""Navigator Agent — Live Google Maps routing with weather and HazMat compliance."""
+"""Navigator Agent — live routing, weather context, and HazMat compliance notes.
+
+Combines structured location extraction, synchronous Maps SDK work offloaded to a
+thread pool, and async weather aggregation so route answers stay responsive under
+FastAPI's event loop.
+"""
 
 import logging
 from typing import Dict
@@ -14,12 +19,42 @@ logger = logging.getLogger(__name__)
 
 
 async def navigator_agent_node(state: AgentState) -> AgentState:
-    """Real navigator node:
+    """Plan a route, enrich with weather, and persist artifacts for the Streamlit map.
 
-    1. Extract origin + destination from the user query via LLM.
-    2. Fetch a live driving route from Google Maps (or mock fallback).
-    3. Build a compliance-aware markdown answer.
-    4. Store route_data in state so Streamlit can render the folium map.
+    State Mutations:
+        READS:
+            - ``query`` — Natural-language origin/destination text for geocoding
+              via ``extract_locations``.
+        WRITES:
+            - ``final_answer`` — Markdown table + weather + optional tool warnings +
+              HazMat section for the user.
+            - ``route_data`` — Structured polyline and compliance metadata for
+              Folium (``None`` when locations cannot be parsed).
+            - ``weather_data`` — Endpoint weather summary + safety level for the UI
+              card.
+            - ``relevance_score`` — Explicitly cleared to ``None`` (not used on this
+              branch; avoids leaking a prior turn's RAG score).
+            - ``rag_sources`` / ``web_search_used`` — Reset for this branch so mixed
+              sessions do not show stale citations beside a map.
+
+    Why ``anyio.to_thread.run_sync`` for ``get_route``:
+        The Google Maps client path is synchronous; running it directly would block
+        the asyncio loop and stall concurrent API requests.
+
+    Why merge ``**state`` on return:
+        Preserves accumulated fields (e.g., ``messages``, ``thread_id``) while
+        overriding navigator outputs — LangGraph merges dict returns into state.
+
+    Args:
+        state: Current ``AgentState`` including the user ``query``.
+
+    Returns:
+        AgentState: Merged state dict including route and weather payloads or a
+        concise failure message when parsing fails.
+
+    Raises:
+        None: Tool errors are embedded in ``route_data`` / ``weather_data`` via
+        ``api_error`` keys when available.
     """
     query = state.get("query", "")
     logger.info("Navigator agent processing: %s", query[:80])
@@ -51,7 +86,8 @@ async def navigator_agent_node(state: AgentState) -> AgentState:
     # googlemaps is sync; run in a worker thread to avoid blocking the event loop.
     route = await anyio.to_thread.run_sync(get_route, origin, destination)
 
-    # ── Step 2b: fetch weather for both endpoints via MCP weather server ──────
+    # Weather is async-native (HTTP/MCP stack) — keeps parity with FastAPI without
+    # nested ``asyncio.run`` calls that would break inside a running loop.
     weather = await get_route_weather(origin, destination)
     logger.info(
         "Route weather: %s (mock=%s)", weather["overall_safety"], weather["is_mock"]
@@ -82,7 +118,8 @@ async def navigator_agent_node(state: AgentState) -> AgentState:
         f"{weather['raw_text']}"
     )
 
-    # If tools fell back due to API errors, surface a compact note to the user.
+    # Degrade gracefully: maps/weather may be missing API keys or hit quota;
+    # inline notices explain *why* the UI shows mock or partial data.
     tool_warnings = []
     if route.get("api_error"):
         tool_warnings.append(f"- **Maps**: {route['api_error']}")

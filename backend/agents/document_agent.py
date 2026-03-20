@@ -1,4 +1,8 @@
-"""Document Agent — multimodal (vision) logistics extraction."""
+"""Document Agent — multimodal (vision) logistics extraction for TransOrchestra.
+
+Uses OpenAI-compatible vision + structured output to turn shipping paperwork
+images into a small Pydantic schema suitable for UI metrics and auditing.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentExtraction(BaseModel):
+    """Structured fields extracted from a logistics document image.
+
+    Attributes:
+        document_type: One of the constrained labels requested in the prompt.
+        origin: Ship-from location text as read from the document.
+        destination: Ship-to location text as read from the document.
+        weight: Human-readable weight string including units when visible.
+        freight_class: Freight class text, or the literal N/A when absent.
+        summary: Short natural-language recap for operators.
+    """
+
     document_type: str
     origin: str
     destination: str
@@ -26,7 +41,17 @@ class DocumentExtraction(BaseModel):
 
 
 def _normalize_base64(image_data: str) -> str:
-    """Return raw base64 without any `data:*;base64,` prefix."""
+    """Strip a data-URL prefix so callers may pass either raw or data-URL base64.
+
+    Args:
+        image_data: Base64 string, optionally prefixed with ``data:*;base64,``.
+
+    Returns:
+        str: Payload portion only, suitable for re-wrapping as a vision URL.
+
+    Raises:
+        None
+    """
     img = (image_data or "").strip()
     if img.startswith("data:"):
         # Expected format: data:image/jpeg;base64,<base64>
@@ -36,7 +61,34 @@ def _normalize_base64(image_data: str) -> str:
 
 
 async def document_agent_node(state: AgentState) -> Dict[str, Any]:
-    """Extract structured logistics data from an uploaded image."""
+    """Extract structured logistics fields from an uploaded document image.
+
+    State Mutations:
+        READS:
+            - ``image_data`` — Required; without it the node returns a user-facing
+              error in ``final_answer``.
+            - ``query`` — Optional user note appended to the vision prompt for
+              context (e.g., 'confirm weight').
+        WRITES:
+            - ``extracted_doc_data`` — Dict from ``DocumentExtraction.model_dump()``
+              on success, else ``None``.
+            - ``final_answer`` — Human-readable summary for chat UIs.
+
+    Why ``data:image/jpeg;base64,...`` wrapping:
+        The OpenAI multimodal message format expects an image URL object; raw
+        base64 without a MIME prefix is rejected by the API.
+
+    Args:
+        state: ``AgentState`` carrying base64 image data and optional query hint.
+
+    Returns:
+        Dict[str, Any]: Partial state update with ``extracted_doc_data`` and
+        ``final_answer`` keys only.
+
+    Raises:
+        None: Vision/LLM failures are caught and surfaced as a graceful
+        ``final_answer`` string with ``extracted_doc_data`` cleared.
+    """
     image_data: Optional[str] = state.get("image_data")
     query: str = state.get("query", "")
 
@@ -52,7 +104,8 @@ async def document_agent_node(state: AgentState) -> Dict[str, Any]:
     llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=settings.OPENAI_API_KEY)
     structured_llm = llm.with_structured_output(DocumentExtraction)
 
-    # Vision payload: OpenAI requires `data:<mime>;base64,<base64>` formatting.
+    # Vision payload must be a proper data URL; we normalize first because the
+    # frontend may send either bare base64 or a full data-URL string.
     base64_str = _normalize_base64(image_data)
     image_url = f"data:image/jpeg;base64,{base64_str}"
 

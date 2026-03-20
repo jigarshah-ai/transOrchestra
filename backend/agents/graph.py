@@ -1,7 +1,39 @@
-"""LangGraph orchestration graph for TransOrchestra multi-agent system."""
+"""LangGraph orchestration graph for TransOrchestra multi-agent system.
+
+This module defines the **control-plane topology** for the TransOrchestra LangGraph:
+
+**Flow (high level)**:
+    1. **START** → **dispatcher** — The entry node classifies intent (or forces
+       ``document_processing`` when an image payload is present; see
+       ``dispatcher_node``).
+    2. **dispatcher** → *conditional edge* → one of:
+       - **safety_agent** — Hybrid RAG + optional Tavily for ``safety_query``.
+       - **maintenance_agent** — Same RAG stack as safety for ``maintenance_query``
+         (separate node id for observability).
+       - **general_agent** — Greetings / chit-chat for ``general`` (no RAG).
+       - **navigator_agent** — Live routing, weather, and HazMat notes for
+         ``route_query``.
+       - **document_agent** — Vision-based structured extraction for
+         ``document_processing``.
+    3. **Specialized agent** → **END** — Each branch is a short DAG (no cycles);
+       agents merge their outputs into ``AgentState`` and terminate.
+
+**Why this shape**:
+    - A single **dispatcher** keeps routing logic in one place and avoids every
+      agent re-implementing intent detection.
+    - **Fan-out from dispatcher** encodes product rules (which subsystem owns
+      which question type) without hard-coding calls inside the UI.
+    - **MemorySaver** checkpointing (see ``build_graph``) enables thread-scoped
+      conversational memory keyed by ``thread_id`` in ``run_graph``.
+
+**Visualization**:
+    ``GRAPH_FLOW_NODES`` / ``GRAPH_FLOW_EDGES`` and ``get_graph_flow_data()`` feed
+    the Streamlit UI so reviewers can see static topology plus the per-request
+    ``execution_path``.
+"""
 
 import logging
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -9,6 +41,8 @@ from langgraph.graph import END, START, StateGraph
 
 from backend.agents.dispatcher import dispatcher_node
 from backend.agents.document_agent import document_agent_node
+from backend.agents.general_agent import general_agent_node
+from backend.agents.maintenance_agent import maintenance_agent_node
 from backend.agents.navigator_agent import navigator_agent_node
 from backend.agents.safety_agent import safety_agent_node
 from backend.agents.state import AgentState
@@ -17,6 +51,8 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Graph flow visualization (nodes + edges + tools per node) ───────────────────
+# These structures are UI-only metadata: they mirror the compiled graph so the
+# frontend can render Graphviz without importing LangGraph internals.
 GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
     {"id": "__start__", "label": "Start", "tools": []},
     {"id": "dispatcher", "label": "Dispatcher", "tools": ["LLM (intent classification)"]},
@@ -24,6 +60,16 @@ GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
         "id": "safety_agent",
         "label": "Safety Agent",
         "tools": ["RAG (ChromaDB + BM25)", "Cohere Reranker", "Tavily (if low relevance)"],
+    },
+    {
+        "id": "maintenance_agent",
+        "label": "Maintenance Agent",
+        "tools": ["RAG (same pipeline as safety)", "Tavily (if low relevance)"],
+    },
+    {
+        "id": "general_agent",
+        "label": "General Agent",
+        "tools": ["Fixed greeting (no RAG)"],
     },
     {
         "id": "document_agent",
@@ -40,46 +86,92 @@ GRAPH_FLOW_NODES: List[Dict[str, Any]] = [
 
 GRAPH_FLOW_EDGES: List[Dict[str, str]] = [
     {"from": "__start__", "to": "dispatcher", "label": ""},
-    {"from": "dispatcher", "to": "safety_agent", "label": "safety / general / maintenance"},
+    {"from": "dispatcher", "to": "safety_agent", "label": "safety_query"},
+    {"from": "dispatcher", "to": "maintenance_agent", "label": "maintenance_query"},
+    {"from": "dispatcher", "to": "general_agent", "label": "general"},
     {"from": "dispatcher", "to": "document_agent", "label": "document_processing"},
     {"from": "dispatcher", "to": "navigator_agent", "label": "route_query"},
     {"from": "safety_agent", "to": "__end__", "label": ""},
+    {"from": "maintenance_agent", "to": "__end__", "label": ""},
+    {"from": "general_agent", "to": "__end__", "label": ""},
     {"from": "document_agent", "to": "__end__", "label": ""},
     {"from": "navigator_agent", "to": "__end__", "label": ""},
 ]
 
 
 def get_graph_flow_data() -> Dict[str, Any]:
-    """Return graph topology (nodes, edges) for UI visualization."""
+    """Return static graph topology for UI visualization.
+
+    Returns:
+        Dict[str, Any]: Mapping with keys ``nodes`` and ``edges`` (lists), suitable
+        for building a Graphviz DOT diagram alongside a per-run
+        ``execution_path`` (injected in ``run_graph``).
+    """
     return {"nodes": GRAPH_FLOW_NODES, "edges": GRAPH_FLOW_EDGES}
 
 
 def route_after_dispatch(
     state: AgentState,
 ) -> str:
-    """Conditional edge: map classified intent to the appropriate agent node."""
+    """Map post-dispatcher ``AgentState.intent`` to the next graph node name.
+
+    LangGraph invokes this after ``dispatcher_node``; the return value must match
+    a key in ``add_conditional_edges``'s path map. Normalizing intent here avoids
+    brittle routing when the LLM emits trailing whitespace or inconsistent case.
+
+    Args:
+        state: Current graph state; only ``intent`` is read for routing.
+
+    Returns:
+        str: Next node id: ``navigator_agent``, ``safety_agent``,
+            ``maintenance_agent``, ``general_agent``, or ``document_agent``.
+            Unknown intents fall back to ``safety_agent`` so odd classifier
+            outputs still get a RAG attempt.
+
+    Raises:
+        None: This function does not raise.
+    """
 
     intent = (state.get("intent", "general") or "").strip().lower()
     logger.info("Routing evaluated intent as: %s", intent)
     if intent == "route_query":
         return "navigator_agent"
-    if intent in ("safety_query", "maintenance_query"):
+    if intent == "safety_query":
         return "safety_agent"
+    if intent == "maintenance_query":
+        return "maintenance_agent"
     if intent == "document_processing":
         return "document_agent"
     if intent == "general":
-        # No dedicated general agent exists; fall back to safety_agent.
-        return "safety_agent"
-    # Unknown intent: end early (safer than guessing another agent).
+        return "general_agent"
+    # Unknown intent: RAG may still help; avoid sending arbitrary text to general-only greeting.
     return "safety_agent"
 
 
 def build_graph():
-    """Build, compile, and return the TransOrchestra LangGraph with MemorySaver checkpointing."""
+    """Build, compile, and return the TransOrchestra LangGraph with checkpointing.
+
+    Compiles a ``StateGraph(AgentState)`` with:
+        - Six worker nodes: ``dispatcher``, ``safety_agent``, ``maintenance_agent``,
+          ``general_agent``, ``document_agent``, ``navigator_agent``.
+        - A conditional edge from ``dispatcher`` driven by ``route_after_dispatch``.
+        - Linear edges from each agent to ``END``.
+        - ``MemorySaver`` so ``ainvoke`` can persist thread state when a
+          ``thread_id`` is supplied in the runnable config.
+
+    Returns:
+        object: Compiled LangGraph instance ready for ``ainvoke`` / ``invoke``.
+
+    Raises:
+        Exception: Propagates if node registration or compilation fails (e.g.
+            invalid state schema).
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("dispatcher", dispatcher_node)
     graph.add_node("safety_agent", safety_agent_node)
+    graph.add_node("maintenance_agent", maintenance_agent_node)
+    graph.add_node("general_agent", general_agent_node)
     graph.add_node("document_agent", document_agent_node)
     graph.add_node("navigator_agent", navigator_agent_node)
 
@@ -89,12 +181,16 @@ def build_graph():
         route_after_dispatch,
         {
             "safety_agent": "safety_agent",
+            "maintenance_agent": "maintenance_agent",
+            "general_agent": "general_agent",
             "navigator_agent": "navigator_agent",
             "document_agent": "document_agent",
             END: END,
         },
     )
     graph.add_edge("safety_agent", END)
+    graph.add_edge("maintenance_agent", END)
+    graph.add_edge("general_agent", END)
     graph.add_edge("document_agent", END)
     graph.add_edge("navigator_agent", END)
 
@@ -104,12 +200,20 @@ def build_graph():
     return compiled
 
 
-# Module-level singleton compiled graph.
+# Module-level singleton compiled graph — avoids rebuilding the graph on every
+# API request (compilation is not free; checkpoint wiring is stable per process).
 _graph = None
 
 
 def _get_graph():
-    """Return the singleton compiled graph, building it on first call."""
+    """Return the process-wide compiled graph, lazily building it once.
+
+    Returns:
+        object: The singleton compiled LangGraph from ``build_graph``.
+
+    Raises:
+        Exception: Propagates from ``build_graph`` on first build failure.
+    """
     global _graph
     if _graph is None:
         _graph = build_graph()
@@ -117,7 +221,26 @@ def _get_graph():
 
 
 async def run_graph(query: str, thread_id: str = "default", image_base64: str | None = None) -> dict:
-    """Invoke the full multi-agent graph for *query* and return a structured result dict."""
+    """Run one end-to-end multi-agent turn and normalize outputs for the API layer.
+
+    Seeds ``AgentState`` with a single ``HumanMessage``, optional ``image_base64``
+    (consumed by the dispatcher / document path), and default empty fields so
+    downstream nodes can rely on keys existing.
+
+    Args:
+        query: End-user text (or placeholder when an image drives document flow).
+        thread_id: Checkpointer thread id for conversational continuity.
+        image_base64: Optional raw or data-URL base64 payload for vision extraction.
+
+    Returns:
+        dict: API-oriented payload including ``answer``, ``sources``, ``intent``,
+            ``agent_used``, telemetry (models, relevance), ``flow_data`` with
+            ``execution_path``, and optional ``route_data`` / ``weather_data`` /
+            ``extracted_doc_data``.
+
+    Raises:
+        Exception: Logs and re-raises if ``ainvoke`` fails (caller maps to HTTP 500).
+    """
     compiled = _get_graph()
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -149,12 +272,15 @@ async def run_graph(query: str, thread_id: str = "default", image_base64: str | 
         elif intent == "document_processing":
             agent_used = "document_agent"
             execution_path = ["__start__", "dispatcher", "document_agent", "__end__"]
-        elif intent in ("safety_query", "maintenance_query"):
+        elif intent == "safety_query":
             agent_used = "safety_agent"
             execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
+        elif intent == "maintenance_query":
+            agent_used = "maintenance_agent"
+            execution_path = ["__start__", "dispatcher", "maintenance_agent", "__end__"]
         elif intent == "general":
-            agent_used = "safety_agent"
-            execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]
+            agent_used = "general_agent"
+            execution_path = ["__start__", "dispatcher", "general_agent", "__end__"]
         else:
             agent_used = "safety_agent"
             execution_path = ["__start__", "dispatcher", "safety_agent", "__end__"]

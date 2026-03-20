@@ -1,4 +1,9 @@
-"""Dispatcher node — classifies incoming queries and routes to the correct agent."""
+"""Dispatcher LangGraph node — intent classification for TransOrchestra.
+
+The dispatcher is the **sole routing authority** after START: it either classifies
+free-text with a structured-output LLM or **short-circuits** to document flow
+when binary image data is already present in state (see ``dispatcher_node``).
+"""
 
 import logging
 from enum import Enum
@@ -12,16 +17,22 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 1. Force the LLM to choose from this exact list
+# Enum-backed labels constrain the classifier to a closed set LangGraph routing
+# can depend on (open strings would invite drift and broken edges).
 class IntentCategory(str, Enum):
+    """Closed set of routing labels consumed by ``route_after_dispatch``."""
+
     SAFETY = "safety_query"
     ROUTE = "route_query"
     MAINTENANCE = "maintenance_query"
     GENERAL = "general"
     DOCUMENT = "document_processing"
 
-# 2. The LLM reads these descriptions to understand the nuance
+# Field descriptions are embedded in the JSON schema sent to the model — they
+# act as soft rules so "hours of service" maps to safety, not route.
 class IntentClassification(BaseModel):
+    """LLM-facing schema for structured intent classification."""
+
     intent: IntentCategory = Field(
         description=(
             "Classify the user's intent into exactly one category:\n"
@@ -34,7 +45,37 @@ class IntentClassification(BaseModel):
     )
 
 async def dispatcher_node(state: AgentState) -> AgentState:
-    """Extract the last user message, classify intent using structured output, and update state."""
+    """Classify user intent or force document-processing when an image is attached.
+
+    State Mutations:
+        READS:
+            - ``messages`` — Last message content is treated as the user query when
+              present (LangGraph chat history pattern).
+            - ``query`` — Fallback text if the message list is empty.
+            - ``image_data`` — When non-empty, **skips** the classifier LLM entirely
+              so uploads cannot be mislabeled as ``general``/``route_query``.
+        WRITES:
+            - ``query`` — Echoed user text, or the fixed prompt
+              ``"Process uploaded document."`` for the document branch.
+            - ``intent`` — One of ``IntentCategory`` string values for downstream
+              ``route_after_dispatch``.
+
+    Why bypass the LLM when ``image_data`` is present:
+        Vision/document handling is a different modality; asking a text classifier
+        "what is this image" without reliable image input would be noisy and could
+        strand uploads in the wrong agent. A deterministic override guarantees
+        the graph reaches ``document_agent`` and keeps latency predictable.
+
+    Args:
+        state: Current ``AgentState`` including messages and optional image payload.
+
+    Returns:
+        AgentState: **Partial** update dict ``{"query": ..., "intent": ...}`` only
+        (LangGraph merges updates; do not spread full state here).
+
+    Raises:
+        None: Exceptions are caught; on failure intent defaults to ``"general"``.
+    """
     try:
         messages = state.get("messages", [])
         if messages:
@@ -48,7 +89,8 @@ async def dispatcher_node(state: AgentState) -> AgentState:
             logger.info("Dispatcher detected image upload — routing to document_agent.")
             return {"query": "Process uploaded document.", "intent": IntentCategory.DOCUMENT.value}
 
-        # Initialize the LLM (intent classification only; skipped for document processing).
+        # Structured output binds the model to ``IntentClassification`` (Pydantic),
+        # yielding a parseable label without fragile JSON prompting.
         llm = ChatOpenAI(
             model=settings.LLM_MODEL,
             temperature=0,
@@ -56,7 +98,7 @@ async def dispatcher_node(state: AgentState) -> AgentState:
         )
         structured_llm = llm.with_structured_output(IntentClassification)
 
-        # Simple prompt (the descriptions above do the heavy work)
+        # Short user-facing prompt; category nuance lives in the schema descriptions.
         prompt = f"Classify this logistics query: '{query}'"
         
         response = await structured_llm.ainvoke([HumanMessage(content=prompt)])

@@ -362,10 +362,10 @@ The Dispatcher node classifies every query into one of the following intents, th
 | Intent | Trigger Examples | Routed To |
 |---|---|---|
 | `safety_query` | HazMat rules, placards, DOT compliance | Safety Agent → RAG |
-| `maintenance_query` | Brake specs, inspection requirements, DVIRs | Safety Agent → RAG |
+| `maintenance_query` | Brake specs, inspection requirements, DVIRs | Maintenance Agent → RAG (same pipeline as safety) |
 | `route_query` | "Route from X to Y", distance, ETA | Navigator Agent → Google Maps |
 | `document_processing` | When `image_data` is present (uploaded BOL/receipt) | Document Clerk (vision extraction) |
-| `general` | Anything else | Safety Agent (greeting fallback; RAG skipped, no citations) |
+| `general` | Greetings, HR/admin chit-chat | General Agent (fixed greeting; no RAG, no citations) |
 
 ---
 

@@ -309,10 +309,14 @@ graph.add_node("navigator_agent", navigator_agent_node)
 graph.add_edge(START, "dispatcher")
 graph.add_conditional_edges("dispatcher", route_after_dispatch, {
     "safety_agent": "safety_agent",
+    "maintenance_agent": "maintenance_agent",
+    "general_agent": "general_agent",
     "navigator_agent": "navigator_agent",
     "document_agent": "document_agent",
 })
 graph.add_edge("safety_agent", END)
+graph.add_edge("maintenance_agent", END)
+graph.add_edge("general_agent", END)
 graph.add_edge("document_agent", END)
 graph.add_edge("navigator_agent", END)
 
@@ -321,9 +325,11 @@ return graph.compile(checkpointer=MemorySaver())
 
 Routing function `route_after_dispatch`:
 - `"route_query"` → `"navigator_agent"`
-- `"safety_query"` and `"maintenance_query"` → `"safety_agent"`
+- `"safety_query"` → `"safety_agent"`
+- `"maintenance_query"` → `"maintenance_agent"` (delegates to same RAG pipeline as safety)
 - `"document_processing"` → `"document_agent"`
-- `"general"` → `"safety_agent"` (greeting fallback)
+- `"general"` → `"general_agent"` (greeting; no RAG)
+- unknown / other → `"safety_agent"` (defensive RAG fallback)
 
 **`run_graph(query, thread_id="default", image_base64=None) → dict`**
 - Builds initial `AgentState` with `HumanMessage(query)` and `image_data=image_base64`

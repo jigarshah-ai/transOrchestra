@@ -1,4 +1,20 @@
-"""TransOrchestra Streamlit frontend — Logistics Control Tower."""
+"""TransOrchestra Streamlit frontend — logistics control tower UI.
+
+This module is a **thin presentation layer** over the FastAPI backend:
+
+    - Renders chat history, compliance maps (Folium), weather cards, dual LLM
+      comparison expanders, and Graphviz agent-flow diagrams returned as JSON.
+    - Manages ``st.session_state`` for thread ids, chat transcripts, and a
+      **consume-once** image pipeline: base64 is attached only while
+      ``image_ready_for_extraction`` is true so text questions after a document
+      upload are not re-routed to the vision agent indefinitely.
+
+Run locally with::
+
+    streamlit run frontend/app.py
+
+Ensure the API is available at ``BACKEND_URL`` (default ``http://localhost:8000/api/v1``).
+"""
 
 import base64
 import hashlib
@@ -12,7 +28,8 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-# Allow importing backend config from anywhere.
+# Streamlit executes this file as a script — prepend repo root so `backend.*`
+# imports resolve identically to FastAPI's PYTHONPATH layout.
 project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
@@ -48,6 +65,16 @@ def render_weather_card(weather_data: dict) -> None:
       DANGEROUS → red card     🚨
 
     Shown alongside the folium map for route_query responses only.
+
+    Args:
+        weather_data: Navigator payload containing ``raw_text``, ``overall_safety``,
+            and optional ``is_mock`` flag.
+
+    Returns:
+        None: Renders inline via ``st.markdown``.
+
+    Raises:
+        None
     """
     if not weather_data or not weather_data.get("raw_text"):
         return
@@ -172,7 +199,17 @@ def render_route_map(route_data: dict) -> None:
 
 
 def render_model_comparison(model_comparison: dict) -> None:
-    """Render side-by-side open vs closed model outputs."""
+    """Render side-by-side open vs closed model outputs from ``llm_comparison``.
+
+    Args:
+        model_comparison: Backend dict with ``open`` / ``closed`` sub-results.
+
+    Returns:
+        None
+
+    Raises:
+        None
+    """
     if not model_comparison:
         return
     open_out = model_comparison.get("open", {})
@@ -207,12 +244,32 @@ def render_model_comparison(model_comparison: dict) -> None:
 
 
 def _dot_escape(s: str) -> str:
-    """Escape double quotes and backslashes for DOT label."""
+    """Escape characters that would break Graphviz string literals.
+
+    Args:
+        s: Raw label fragment.
+
+    Returns:
+        str: DOT-safe escaped string.
+
+    Raises:
+        None
+    """
     return (s.replace("\\", "\\\\").replace('"', '\\"') if s else "")
 
 
 def render_flow_viz(flow_data: dict) -> None:
-    """Render graph flow compactly."""
+    """Render a compact Graphviz diagram with the active execution path highlighted.
+
+    Args:
+        flow_data: Must include ``nodes``, ``edges``, and ``execution_path`` from API.
+
+    Returns:
+        None
+
+    Raises:
+        None
+    """
     if not flow_data:
         return
     nodes = flow_data.get("nodes", [])
@@ -222,7 +279,8 @@ def render_flow_viz(flow_data: dict) -> None:
     if not nodes and not edges:
         return
 
-    # Tighter layout instructions for Graphviz
+    # Tight Graphviz directives keep the diagram legible inside Streamlit without
+    # excessive vertical whitespace (portfolio/demo UX requirement).
     lines = [
         "digraph G {",
         "  rankdir=LR;",
@@ -321,14 +379,14 @@ with st.sidebar:
         image_sha = hashlib.sha256(image_bytes).hexdigest()
         prev_sha = st.session_state.get("image_sha256")
         if prev_sha != image_sha:
-            # New upload: enable extraction for the next query.
+            # Fresh file bytes → allow one backend round-trip with image payload.
             st.session_state.image_sha256 = image_sha
             st.session_state.image_ready_for_extraction = True
 
         if st.session_state.get("image_ready_for_extraction", False):
             st.session_state.image_base64 = base64.b64encode(image_bytes).decode("utf-8")
         else:
-            # After extraction, consume the image so future queries route normally.
+            # Consume-once: clear payload so dispatcher stops forcing document flow.
             st.session_state.image_base64 = None
         # Streamlit uses `use_column_width` for images (older versions don't support `use_container_width`)
         st.image(image_bytes, caption=st.session_state.image_filename, use_column_width=True)

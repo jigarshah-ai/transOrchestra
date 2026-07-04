@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = Field(default="", description="Tavily key (optional).")
     GOOGLE_MAPS_API_KEY: str = Field(default="", description="Google Maps key (optional).")
     OPENWEATHERMAP_API_KEY: str = Field(default="", description="OpenWeatherMap key (optional).")
+    # ── Google Gemini ──────────────────────────────────────────────────────────
+    GOOGLE_API_KEY: str = Field(default="", description="Google Gemini API key (optional).")
 
     # ── Weather ────────────────────────────────────────────────────────────────
     WEATHER_UNITS: Literal["imperial", "metric"] = "imperial"

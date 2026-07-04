@@ -74,6 +74,9 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
     • Latency (ms)
     • route_data  (map polyline + compliance — route queries only)
     • weather_data (safety level + forecast — route queries only)
+    • agent_used (safety_agent | navigator_agent)
+    • relevance_score (safety_agent only)
+    • llm_model / embedding_model (telemetry for UI)
 ```
 
 ---
@@ -97,13 +100,12 @@ The **Knowledge-to-Action gap** in logistics is acute: regulatory knowledge live
 | Map rendering (Streamlit) | streamlit-folium | 0.22.0 |
 | Weather Data | OpenWeatherMap REST API | httpx 0.27.0 |
 | MCP Server | Model Context Protocol | mcp 1.0.0 |
-| Async compatibility | nest-asyncio (FastAPI loop fix) | nest_asyncio ≥ 1.5.9 |
 | RAG Framework | LangChain | 0.2.16 |
 | Observability & Tracing | LangSmith | ≥ 0.1.112 |
 | Evaluation | Ragas (Faithfulness + Answer Relevancy) | 0.1.21 |
 | Document Loading | PyPDF | 4.3.1 |
 | Text Splitting | langchain-text-splitters | 0.2.4 |
-| Config Management | python-dotenv | 1.0.1 |
+| Config Management | Pydantic Settings (`BaseSettings`) | pydantic-settings 2.4.0 |
 
 ---
 
@@ -167,6 +169,10 @@ pip install -r requirements.txt
 copy .env.example .env
 # Open .env and fill in your API keys
 ```
+
+> **Note (common setup):** This project can load `.env` from either:
+> - `transOrchestra/.env` (recommended)
+> - `Final_Project/.env` (supported for your workspace layout)
 
 ```env
 OPENAI_API_KEY=sk-...            # Required
@@ -258,10 +264,22 @@ Run a query through the full multi-agent graph.
     {"filename": "49_CFR_395.pdf", "page": 14}
   ],
   "intent": "safety_query",
+  "agent_used": "safety_agent",
   "web_search_used": false,
+  "relevance_score": 0.686,
   "latency_ms": 2341,
   "route_data": null,
-  "weather_data": null
+  "weather_data": null,
+  "llm_model": "gpt-4o-mini",
+  "llm_provider": "openai",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "llm_comparison": {
+    "open": {"model": "meta-llama/llama-3-8b-instruct", "latency_ms": 1437, "error": null},
+    "closed": {"model": "openai/gpt-4o-mini", "latency_ms": 980, "error": null}
+  },
+  "flow_data": {
+    "execution_path": ["__start__", "dispatcher", "safety_agent", "__end__"]
+  }
 }
 ```
 
@@ -271,6 +289,7 @@ Run a query through the full multi-agent graph.
   "answer": "**Route: Chicago, IL → Detroit, MI** ...",
   "sources": [],
   "intent": "route_query",
+  "agent_used": "navigator_agent",
   "web_search_used": false,
   "latency_ms": 3821,
   "route_data": {
@@ -285,7 +304,19 @@ Run a query through the full multi-agent graph.
     "overall_safety": "ADVISORY",
     "has_warning": false,
     "raw_text": "Route weather summary\n\nORIGIN — Chicago, IL\n  Partly Cloudy...",
-    "is_mock": true
+    "is_mock": true,
+    "api_error": null
+  },
+  "relevance_score": null,
+  "llm_model": "gpt-4o-mini",
+  "llm_provider": "openrouter",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "llm_comparison": {
+    "open": {"model": "meta-llama/llama-3-8b-instruct", "latency_ms": 1512, "error": null},
+    "closed": {"model": "openai/gpt-4o-mini", "latency_ms": 1040, "error": null}
+  },
+  "flow_data": {
+    "execution_path": ["__start__", "dispatcher", "navigator_agent", "__end__"]
   }
 }
 ```
@@ -326,14 +357,29 @@ Liveness check.
 
 ## Agent Routing Logic
 
-The Dispatcher node classifies every query into one of four intents, then routes it:
+The Dispatcher node classifies every query into one of the following intents, then routes it:
 
 | Intent | Trigger Examples | Routed To |
 |---|---|---|
 | `safety_query` | HazMat rules, placards, DOT compliance | Safety Agent → RAG |
-| `maintenance_query` | Brake specs, inspection requirements, DVIRs | Safety Agent → RAG |
+| `maintenance_query` | Brake specs, inspection requirements, DVIRs | Maintenance Agent → RAG (same pipeline as safety) |
 | `route_query` | "Route from X to Y", distance, ETA | Navigator Agent → Google Maps |
-| `general` | Anything else | Safety Agent → RAG (fallback) |
+| `document_processing` | When `image_data` is present (uploaded BOL/receipt) | Document Clerk (vision extraction) |
+| `general` | Greetings, HR/admin chit-chat | General Agent (fixed greeting; no RAG, no citations) |
+
+---
+
+## Intelligent Document Clerk (Multimodal Vision)
+
+Upload a BOL/receipt image in the sidebar, then send your question.
+
+The UI sends the image as `image_base64` to `/api/v1/query`, and the backend routes the request to the `document_agent` (vision + structured extraction). The extracted fields are returned as `extracted_doc_data` and displayed in Streamlit under the expander **"Extracted Document Data"**.
+
+After a successful extraction, the frontend consumes the image once (sets `image_base64=None`), so the next “normal” question routes back to safety/route agents unless you upload a new image.
+
+### Screenshot (example output)
+
+![Intelligent Document Clerk output](assets/document-clerk-output-snapshot.png)
 
 ---
 
@@ -396,6 +442,10 @@ User: "Route from Chicago IL to Detroit MI"
 | Interactive folium map | `route_data.polyline_coords` | Always for route queries |
 | **Weather safety card** | `weather_data` from MCP server | Always for route queries |
 
+### Live screenshot — route + weather + map
+
+![TransOrchestra route + weather + map](assets/route-weather-map.png)
+
 ### Weather safety levels
 
 | Level | Colour | Icon | Trigger |
@@ -412,8 +462,7 @@ The card references the relevant FMCSA regulation (49 CFR 392.14) in its advisor
 The weather integration uses the **Model Context Protocol (MCP)** pattern:
 
 ```
-weather_tool.py (synchronous LangGraph tool)
-    │  asyncio.run() via nest_asyncio (safe inside FastAPI event loop)
+weather_tool.py (async-native tool)
     ▼
 backend/mcp_servers/weather_server.py  (MCP Server instance)
     │  _fetch_route_weather(origin, destination)
@@ -528,7 +577,7 @@ python eval/run_ragas.py --compare
 |---|---|---|
 | Vector only | TBD | TBD |
 | Hybrid (BM25 + Vector) | TBD | TBD |
-| Hybrid + Reranker | TBD | TBD |
+| Hybrid + Reranker | 0.7319 | 0.9294 |
 
 *Run `python eval/run_ragas.py --compare` after ingesting documents to populate this table.*
 
@@ -542,7 +591,7 @@ transOrchestra/
 ├── backend/                        # FastAPI application
 │   ├── __init__.py
 │   ├── main.py                     # App entry point, CORS, startup events
-│   ├── config.py                   # Centralised config via python-dotenv
+│   ├── config.py                   # Centralised config via Pydantic BaseSettings (validated)
 │   │
 │   ├── api/
 │   │   ├── __init__.py
@@ -572,7 +621,7 @@ transOrchestra/
 │       ├── __init__.py
 │       ├── location_extractor.py   # LLM-powered city/state extractor
 │       ├── maps_tool.py            # Google Maps API + mock fallback + state rules
-│       └── weather_tool.py         # Sync wrapper — calls MCP weather server in-process
+│       └── weather_tool.py         # Async wrapper — calls MCP weather server in-process
 │
 ├── frontend/
 │   └── app.py                      # Streamlit Control Tower UI
@@ -639,6 +688,61 @@ tests/test_retriever.py::TestBuildRerankingRetriever::test_falls_back_without_co
 | Route | "How long to drive from Houston TX to Dallas TX?" | `route_query` | **Yes** | **Yes** |
 | Route | "What is the best route from New York to Boston?" | `route_query` | **Yes** | **Yes** |
 | Route | "Plan a HazMat shipment from Los Angeles CA to Phoenix AZ" | `route_query` | **Yes** | **Yes** |
+
+---
+
+## UI Observability Badges (Streamlit)
+
+To make the system easy to **debug, demo, and explain in interviews**, the Streamlit UI shows compact runtime telemetry under each assistant message.
+
+![TransOrchestra UI — badges + model caption](assets/ui-observability-badges.png)
+
+### What each badge means
+
+| UI element | Example | Meaning |
+|---|---|---|
+| **Intent** | `safety_query` | Dispatcher’s classification output |
+| **Agent** | `safety_agent` / `navigator_agent` | Which LangGraph node handled the request |
+| **Relevance** | `0.686` | Mean similarity score (0–1) from ChromaDB retrieval (Safety Agent only) |
+| **🌐 Web search used** | On/Off | Tavily corrective web search fired due to low relevance |
+| **Latency** | `⏱ 2341 ms` | End-to-end request latency for `/api/v1/query` |
+| **Model caption** | `Model: gpt-4o-mini · Embeddings: BAAI/bge-small-en-v1.5` | Exact LLM + embedding model used for the run (provider shown in UI caption) |
+
+Source citations policy:
+- `general` greetings/admin messages suppress citations entirely (no 📄 Sources dropdown).
+- For other intents, citations are limited to the top 3 relevant PDF pages (for readability).
+
+### Where the UI telemetry comes from
+
+The backend returns these fields on every `/api/v1/query` response:
+- `intent`
+- `agent_used`
+- `relevance_score` *(safety queries only)*
+- `web_search_used`
+- `latency_ms`
+- `llm_model`
+- `llm_provider`
+- `embedding_model`
+- `llm_comparison` (open vs closed model outputs)
+- `flow_data` (LangGraph nodes/edges + execution_path for visualization)
+
+The Streamlit app persists them into `st.session_state.messages`, so they remain visible across reruns.
+
+### Agent flow visualization (this request)
+
+For each query, the UI renders a Graphviz diagram of the LangGraph topology and highlights the nodes taken on this request (filled blue nodes).
+
+![TransOrchestra agent flow (this request)](assets/agent-flow-viz-snapshot.png)
+
+You can see it in the expander **“🔄 Agent flow (this request)”** under each assistant message.
+
+### Open vs Closed model comparison (dual LLM)
+
+When enabled via config, the backend calls both:
+- `LLM_MODEL_OPEN` (free/open model via OpenRouter)
+- `LLM_MODEL_CLOSED` (closed model)
+
+The UI shows both outputs side-by-side in **“🧪 Open vs Closed Model Outputs”**.
 
 ---
 
@@ -723,7 +827,7 @@ No API calls are made and no data is sent when tracing is off.
 
 - **Never commit `.env`** — it contains your API keys. It is already in `.gitignore`.
 - The ChromaDB store (`chroma_db/`) is also in `.gitignore`.
-- API keys are loaded exclusively from `.env` via `python-dotenv` — no hardcoded secrets anywhere in the codebase.
+- API keys are loaded from `.env` via Pydantic Settings — no hardcoded secrets anywhere in the codebase.
 
 ---
 

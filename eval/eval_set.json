@@ -1,77 +1,92 @@
 [
   {
-    "question": "Does a commercial truck driver need a HazMat endorsement on their CDL to transport placarded hazardous materials?",
-    "ground_truth": "Yes. Under 49 CFR 383.93, a driver must have a HazMat endorsement on their CDL to transport any quantity of hazardous materials that requires placarding. Obtaining the endorsement requires passing a TSA security threat assessment and a knowledge test.",
-    "category": "hazmat"
+    "intent": "maintenance_query",
+    "question": "What is the minimum legal tread depth for the front steering tires on a commercial vehicle?",
+    "ground_truth": "You need at least 4/32-inch tread depth in every major groove on front tires.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.1.3"
   },
   {
-    "question": "What does DOT placard number 1203 mean on a tanker truck?",
-    "ground_truth": "DOT placard 1203 identifies gasoline, a Class 3 flammable liquid. Per 49 CFR 172.504, any bulk quantity of gasoline must display this placard on all four sides of the transport vehicle.",
-    "category": "hazmat"
+    "intent": "maintenance_query",
+    "question": "How do you test hydraulic brakes for leaks during a vehicle inspection?",
+    "ground_truth": "Pump the brake pedal three times, apply firm pressure to the pedal, and hold for five seconds. The pedal should not move.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.1.5"
   },
   {
-    "question": "How many feet must a vehicle carrying hazardous materials stay away from an open fire when parked?",
-    "ground_truth": "Under 49 CFR 397.13, a vehicle carrying Division 1.1, 1.2, or 1.3 explosives must not be parked within 300 feet of an open fire.",
-    "category": "hazmat"
+    "intent": "maintenance_query",
+    "question": "At what specific pressure must the low air pressure warning signal activate?",
+    "ground_truth": "The low air pressure warning signal must come on before the pressure drops to less than 60 psi in the air tank.",
+    "context_doc": "Wisconsin CDL Manual, Section 5.1.11"
   },
   {
-    "question": "How many consecutive hours can a property-carrying truck driver drive before they must take a 30-minute rest break?",
-    "ground_truth": "Per 49 CFR 395.3(a)(3)(ii), a property-carrying driver may not drive more than 8 cumulative hours without at least a 30-minute break. The break must be spent off-duty or in the sleeper berth.",
-    "category": "hours_of_service"
+    "intent": "maintenance_query",
+    "question": "During a cab inspection, how long should it take for air pressure to build from 50 to 90 psi?",
+    "ground_truth": "Pressure should build from 50 to 90 psi within 3 minutes.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.1.5"
   },
   {
-    "question": "What is the maximum number of driving hours allowed for a property-carrying commercial driver in a single shift under FMCSA Hours of Service rules?",
-    "ground_truth": "Under 49 CFR 395.3, a property-carrying driver may drive a maximum of 11 hours after 10 consecutive hours off duty. This is known as the 11-hour driving limit.",
-    "category": "hours_of_service"
+    "intent": "safety_query",
+    "question": "If I am driving a 50-foot truck at 35 mph, how much following distance space should I leave in seconds?",
+    "ground_truth": "You should leave 5 seconds of following distance (1 second for each 10 feet of vehicle length at speeds under 40 MPH).",
+    "context_doc": "Wisconsin CDL Manual, Section 2.7.1"
   },
   {
-    "question": "Can a truck driver reset their weekly hours by taking 34 consecutive hours off duty?",
-    "ground_truth": "Yes. Per 49 CFR 395.3(c), a driver may restart their 60/70-hour weekly clock by taking at least 34 consecutive hours off duty. The restart must include two off-duty periods from 1:00 a.m. to 5:00 a.m.",
-    "category": "hours_of_service"
+    "intent": "safety_query",
+    "question": "Where exactly should warning triangles be placed if a truck stops on a one-way or divided highway?",
+    "ground_truth": "Warning devices should be placed 10 feet, 100 feet, and 200 feet toward the approaching traffic.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.5.2"
   },
   {
-    "question": "What must a commercial truck driver document in a Driver Vehicle Inspection Report (DVIR) under FMCSA regulations?",
-    "ground_truth": "Under 49 CFR 396.11, drivers must prepare a written DVIR at the end of each driving day listing any defects or deficiencies in the vehicle that could affect safe operation or cause a breakdown. The carrier must repair noted defects before the next trip.",
-    "category": "vehicle_inspection"
+    "intent": "safety_query",
+    "question": "What is the required fire extinguisher rating for a placarded vehicle carrying hazardous materials?",
+    "ground_truth": "The power unit of placarded vehicles must have a fire extinguisher with a UL rating of 10 B:C or more.",
+    "context_doc": "Wisconsin CDL Manual, Section 9.6.8"
   },
   {
-    "question": "How often does FMCSA require a commercial motor vehicle to undergo a periodic safety inspection?",
-    "ground_truth": "Per 49 CFR 396.17, every commercial motor vehicle must be systematically inspected, repaired, and maintained at least once every 12 months (annual inspection).",
-    "category": "vehicle_inspection"
+    "intent": "safety_query",
+    "question": "According to the manual, how much more likely are you to be fatally injured if you are thrown from the vehicle because you aren't wearing a safety belt?",
+    "ground_truth": "You are 4 times more likely to be fatally injured if you are thrown from the vehicle.",
+    "context_doc": "Wisconsin CDL Manual, Section 1.4"
   },
   {
-    "question": "What qualifications must an inspector have to perform an annual FMCSA inspection on a commercial truck?",
-    "ground_truth": "Under 49 CFR 396.19, annual vehicle inspections must be performed by a qualified inspector who has passed a state or federal training program, or who can demonstrate equivalent training and experience. The carrier must maintain records of inspector qualifications.",
-    "category": "vehicle_inspection"
+    "intent": "route_query",
+    "question": "How far before the nearest rail must a placarded vehicle stop at a railroad crossing?",
+    "ground_truth": "You must stop 15 to 50 feet before the nearest rail.",
+    "context_doc": "Wisconsin CDL Manual, Section 9.6.12"
   },
   {
-    "question": "What is the minimum allowable brake lining thickness on a commercial truck before the brakes must be replaced?",
-    "ground_truth": "Per 49 CFR 393.47, brake linings must be replaced when thickness is less than 1/4 inch on steering axles and less than 1/8 inch on other axles for drum brakes. Disc brake pads must be replaced before the friction material contacts the rotor.",
-    "category": "brakes"
+    "intent": "route_query",
+    "question": "What is the principal way a driver should control their speed on long, steep downgrades?",
+    "ground_truth": "You must use the braking effect of the engine as the principal way of controlling your speed on downgrades.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.6.6"
   },
   {
-    "question": "How fast must air brakes build pressure from 85 to 100 psi on a commercial motor vehicle?",
-    "ground_truth": "Per 49 CFR 393.55, the air brake system must build pressure from 85 to 100 psi within 45 seconds with the engine running at the manufacturer's maximum governed RPM.",
-    "category": "brakes"
+    "intent": "route_query",
+    "question": "At what speed can a commercial vehicle begin to hydroplane if there is standing water on the road?",
+    "ground_truth": "Hydroplaning can occur at speeds as low as 30 mph if there is a lot of water.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.6.2"
   },
   {
-    "question": "What is the maximum allowable brake chamber push rod stroke for a Type 30 brake chamber before the brake is considered out of adjustment?",
-    "ground_truth": "According to FMCSA brake adjustment limits under Appendix G to Subchapter B, a Type 30 brake chamber has a maximum stroke limit of 2.5 inches. If the stroke exceeds this, the brakes are out of adjustment and the vehicle must be placed out of service.",
-    "category": "brakes"
+    "intent": "route_query",
+    "question": "When navigating a roundabout with a single white line separating entry lanes, how should a large truck make a right turn?",
+    "ground_truth": "A large truck is expected to straddle the lanes to make a right turn, a left turn, or a through movement.",
+    "context_doc": "Wisconsin CDL Manual, Section 2.7.6"
   },
   {
-    "question": "How many tie-down straps are required to secure cargo that is between 5 feet and 10 feet long on a flatbed truck?",
-    "ground_truth": "Per 49 CFR 393.102, cargo that is between 5 and 10 feet in length requires a minimum of 2 tie-downs, regardless of the cargo's weight.",
-    "category": "load_securement"
+    "intent": "general",
+    "question": "How many days do I have to notify my employer if I receive a conviction for a traffic violation other than parking?",
+    "ground_truth": "You must notify your employer within 30 days of a conviction for any traffic violations (except parking).",
+    "context_doc": "Wisconsin CDL Manual, Section 1.4"
   },
   {
-    "question": "What is the aggregate working load limit required for tie-downs securing cargo on a commercial vehicle?",
-    "ground_truth": "Under 49 CFR 393.102, the total (aggregate) working load limit of all cargo securement devices used must be at least 50% of the weight of the cargo article being secured.",
-    "category": "load_securement"
+    "intent": "general",
+    "question": "If I was issued a Wisconsin CDL before July 29, 1996, do I need to meet federal medical standards to drive in intrastate commerce?",
+    "ground_truth": "No, drivers issued a Wisconsin CDL prior to July 29, 1996, were grandfathered from the federal medical standards for intrastate commerce.",
+    "context_doc": "Wisconsin CDL Manual, Section 1.2.2"
   },
   {
-    "question": "Is a tarp or cover sufficient on its own to secure loose bulk material on a commercial truck under FMCSA rules?",
-    "ground_truth": "No. Under 49 CFR 393.118, vehicles transporting loose materials like gravel or sand must use a tarp or cover to prevent spillage, but the tarp is not a substitute for required tie-down securement devices. Both are required.",
-    "category": "load_securement"
+    "intent": "general",
+    "question": "What Gross Combination Weight Rating defines a Class A commercial motor vehicle?",
+    "ground_truth": "A Gross Combination Weight Rating (GCWR), actual gross weight or registered weight of over 26,000 pounds, inclusive of a towed unit with a GVWR of over 10,000 pounds.",
+    "context_doc": "Wisconsin CDL Manual, Section 1"
   }
 ]

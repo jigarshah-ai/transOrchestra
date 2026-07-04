@@ -7,7 +7,7 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
-from backend.config import CHROMA_PERSIST_DIR
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,11 @@ def build_vectorstore(docs: List[Document], embedding_model: Embeddings):
             documents=docs,
             embedding=embedding_model,
             collection_name=COLLECTION_NAME,
-            persist_directory=CHROMA_PERSIST_DIR,
+            persist_directory=str(settings.CHROMA_PERSIST_DIR),
         )
         logger.info(
             "Vector store persisted to %s (%d documents added)",
-            CHROMA_PERSIST_DIR,
+            settings.CHROMA_PERSIST_DIR,
             len(docs),
         )
         return vectorstore
@@ -49,20 +49,20 @@ def load_vectorstore(embedding_model: Embeddings):
 
     Raises FileNotFoundError with a helpful message if the store is missing.
     """
-    if not os.path.isdir(CHROMA_PERSIST_DIR):
+    if not os.path.isdir(settings.CHROMA_PERSIST_DIR):
         raise FileNotFoundError(
-            f"No vector store found at '{CHROMA_PERSIST_DIR}'. "
+            f"No vector store found at '{settings.CHROMA_PERSIST_DIR}'. "
             "Run scripts/ingest.py first to create it."
         )
 
     try:
         from langchain_chroma import Chroma
 
-        logger.info("Loading vector store from %s", CHROMA_PERSIST_DIR)
+        logger.info("Loading vector store from %s", settings.CHROMA_PERSIST_DIR)
         vectorstore = Chroma(
             collection_name=COLLECTION_NAME,
             embedding_function=embedding_model,
-            persist_directory=CHROMA_PERSIST_DIR,
+            persist_directory=str(settings.CHROMA_PERSIST_DIR),
         )
         count = vectorstore._collection.count()
         logger.info("Vector store loaded — %d documents in collection", count)

@@ -25,7 +25,11 @@
 
 ## 1. Configuration Reference
 
-All configuration is loaded from `.env` via `backend/config.py`. No values are hardcoded anywhere in the codebase.
+All configuration is loaded via **Pydantic Settings** (`BaseSettings`) in `backend/config.py` and exposed as a singleton `settings` object.
+
+`.env` discovery is production-hardened for your workspace layout:
+- Prefer `transOrchestra/.env`
+- Also supports `Final_Project/.env` (one level above the repo)
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
@@ -76,7 +80,7 @@ Routing logic:
 ```
 model_name starts with "text-embedding"  →  OpenAIEmbeddings(model=model_name)
 anything else                            →  HuggingFaceEmbeddings(model_name, device="cpu", normalize=True)
-model_name is None                       →  reads EMBEDDING_MODEL from config
+model_name is None                       →  reads EMBEDDING_MODEL from settings
 ```
 
 **`compare_embeddings(query: str, docs: List[Document]) → dict`**
@@ -169,6 +173,7 @@ System prompt enforces:
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]  # LangGraph message history
     query: str                                # current user query
+    image_data: Optional[str]                # base64-encoded image for document processing
     intent: str                               # dispatcher output
     vehicle_id: str                           # optional conversation context
     cargo_type: str                           # optional conversation context
@@ -177,26 +182,30 @@ class AgentState(TypedDict):
     rag_sources: list                         # source citations
     web_search_used: bool                     # Tavily was triggered
     final_answer: str                         # final response to user
+    extracted_doc_data: Optional[dict]      # structured extraction result for document_processing
     thread_id: str                            # MemorySaver thread key
     route_data: Optional[dict]                # navigator_agent route + polyline; None for all other intents
     weather_data: Optional[dict]              # MCP weather server result; None for non-route intents
+    relevance_score: Optional[float]          # safety_agent relevance score (0.0–1.0); None for route intents
 ```
 
 ---
 
 ### `backend/agents/dispatcher.py`
 
-**`dispatcher_node(state: AgentState) → AgentState`**
+**`dispatcher_node(state: AgentState) → AgentState`** *(async)*
 
 - Extracts last `HumanMessage` from `state["messages"]`
-- Calls `ChatOpenAI` with classification prompt:
+- If `state.get("image_data")` is present, bypasses intent classification and hard-sets:
+  - `state["intent"] = "document_processing"` (routes to `document_agent`)
+- Calls `ChatOpenAI` with classification prompt using `await llm.ainvoke(...)`:
   ```
   Classify this logistics query into exactly one category.
   Return only the category name, nothing else.
-  Categories: safety_query, route_query, maintenance_query, general
+  Categories: safety_query, route_query, maintenance_query, document_processing, general
   Query: {query}
   ```
-- Validates response is one of the 4 categories (defaults to `general` if not)
+- Validates response is one of the categories (defaults to `general` if not)
 - Sets `state["intent"]`
 
 ---
@@ -205,17 +214,20 @@ class AgentState(TypedDict):
 
 **`safety_agent_node(state: AgentState) → AgentState`**
 
-Flow:
+Flow (async, production optimized):
 ```
-1. Load pipeline (vectorstore → hybrid → reranker → RAG chain)
+1. If `intent == "general"`, skip RAG and return a greeting (no citations)
+2. Get resources from RagManager (one-time init: embeddings + Chroma + retrievers + chains)
 2. check_relevance_score(retriever, query)
    ├── score >= threshold → proceed with RAG
    └── score < threshold AND TAVILY_API_KEY set
-       └── run Tavily search → prepend [WEB SOURCE] to query
-3. run_query_with_docs(chain, retriever, query)
+       └── run Tavily search → inject web results as Document context
+3. run_query_with_docs(chain, retriever, query)  (runs in worker thread)
 4. On Cohere 401/reranker failure:
-   └── retry with fresh hybrid-only retriever + chain
-5. Set state["rag_answer"], state["rag_sources"], state["web_search_used"], state["final_answer"]
+   └── retry with RagManager hybrid-only retriever + chain
+5. Set state["rag_answer"], state["rag_sources"], state["web_search_used"], state["final_answer"], state["relevance_score"]
+   - `rag_sources` is limited to max 3 citations for readability
+   - low-relevance + no-web-search suppresses citations entirely
 ```
 
 Handles 3 failure modes gracefully:
@@ -232,9 +244,9 @@ Handles 3 failure modes gracefully:
 Live routing node with Google Maps and MCP weather integration. Execution flow:
 
 ```
-1. extract_locations(query)                  ← LLM extracts origin + destination
-2. get_route(origin, destination)            ← Google Maps or mock fallback
-2b. get_route_weather(origin, destination)   ← MCP weather server or mock fallback
+1. extract_locations(query)                  ← structured output (`LocationInfo`) via `with_structured_output`
+2. get_route(origin, destination)            ← Google Maps or mock fallback (runs in worker thread)
+2b. get_route_weather(origin, destination)   ← async MCP weather server or mock fallback
     → weather emoji + safety level badge for the answer
 3. Build markdown answer table               ← distance, time, traffic ETA, states
 4. Inject weather_section                    ← weather assessment block with FMCSA ref
@@ -252,6 +264,37 @@ Sets four state fields:
 
 ---
 
+### `backend/agents/document_agent.py`
+
+**`document_agent_node(state: AgentState) → dict`**
+
+Vision-based "Intelligent Document Clerk" that extracts structured logistics fields from an uploaded image (BOL/receipt).
+
+Workflow:
+```
+1. If state["image_data"] is missing:
+   → returns extracted_doc_data=None and a helpful final_answer.
+2. Creates `ChatOpenAI(model="gpt-4o", temperature=0)` with `.with_structured_output(DocumentExtraction)`
+3. Sends a vision message:
+   - text prompt: "Extract logistics data from this image"
+   - image_url: {"url": "data:image/jpeg;base64,<...>"}
+4. Returns:
+   - extracted_doc_data = parsed structured fields
+   - final_answer = friendly summary
+
+Note: the Streamlit frontend uses a consume-once pattern for the uploaded image (after the first successful extraction, it clears `image_base64` so later queries don't get forced into document_processing).
+```
+
+Output model `DocumentExtraction` fields:
+- `document_type` (str)
+- `origin` (str)
+- `destination` (str)
+- `weight` (str)
+- `freight_class` (str)
+- `summary` (str)
+
+---
+
 ### `backend/agents/graph.py`
 
 **`build_graph() → CompiledGraph`**
@@ -260,14 +303,21 @@ Sets four state fields:
 graph = StateGraph(AgentState)
 graph.add_node("dispatcher", dispatcher_node)
 graph.add_node("safety_agent", safety_agent_node)
+graph.add_node("document_agent", document_agent_node)
 graph.add_node("navigator_agent", navigator_agent_node)
 
 graph.add_edge(START, "dispatcher")
 graph.add_conditional_edges("dispatcher", route_after_dispatch, {
     "safety_agent": "safety_agent",
+    "maintenance_agent": "maintenance_agent",
+    "general_agent": "general_agent",
     "navigator_agent": "navigator_agent",
+    "document_agent": "document_agent",
 })
 graph.add_edge("safety_agent", END)
+graph.add_edge("maintenance_agent", END)
+graph.add_edge("general_agent", END)
+graph.add_edge("document_agent", END)
 graph.add_edge("navigator_agent", END)
 
 return graph.compile(checkpointer=MemorySaver())
@@ -275,13 +325,18 @@ return graph.compile(checkpointer=MemorySaver())
 
 Routing function `route_after_dispatch`:
 - `"route_query"` → `"navigator_agent"`
-- Everything else → `"safety_agent"`
+- `"safety_query"` → `"safety_agent"`
+- `"maintenance_query"` → `"maintenance_agent"` (delegates to same RAG pipeline as safety)
+- `"document_processing"` → `"document_agent"`
+- `"general"` → `"general_agent"` (greeting; no RAG)
+- unknown / other → `"safety_agent"` (defensive RAG fallback)
 
-**`run_graph(query, thread_id="default") → dict`**
-- Builds initial `AgentState` with `HumanMessage(query)`
+**`run_graph(query, thread_id="default", image_base64=None) → dict`**
+- Builds initial `AgentState` with `HumanMessage(query)` and `image_data=image_base64`
 - Invokes with `{"configurable": {"thread_id": thread_id}}`
 - `MemorySaver` persists message history per thread_id
-- Returns `{"answer", "sources", "intent", "web_search_used", "route_data", "weather_data"}`
+- Returns `{"answer", "sources", "intent", "agent_used", "web_search_used", "route_data", "weather_data", "relevance_score", "llm_model", "embedding_model"}`
+- and (when applicable) `extracted_doc_data` + `flow_data`
 
 ---
 
@@ -289,14 +344,9 @@ Routing function `route_after_dispatch`:
 
 ### `backend/tools/location_extractor.py`
 
-**`extract_locations(query: str) → dict`**
+**`extract_locations(query: str) → LocationInfo`** *(async, structured output)*
 
-Uses `ChatOpenAI` (GPT-4o-mini, temperature=0) to parse natural language route queries into structured origin/destination pairs.
-
-Prompt strategy:
-- Instructs the model to return **only valid JSON** with no markdown fences
-- Strips markdown fences defensively if the model adds them anyway
-- Validates required keys before returning
+Uses `ChatOpenAI(...).with_structured_output(LocationInfo)` and `await llm.ainvoke(...)` to guarantee reliable parsing (no manual `json.loads` or fence stripping).
 
 Return shape:
 ```python
@@ -322,6 +372,8 @@ Falls back to `found=False` on JSON parse errors or LLM failures — the navigat
 **`get_route(origin: str, destination: str) → dict`**
 
 Main routing function. Tries the Google Maps Directions API first; falls back to mock data if key is missing or API call fails.
+
+**Robust failure behaviour:** When Google Maps is unavailable, it returns mock route data **plus** an `api_error` string (e.g. `"Maps API currently unavailable: ..."`). The Navigator agent surfaces this in the answer so the user understands what happened.
 
 Return shape:
 ```python
@@ -427,7 +479,7 @@ The classifier also includes the relevant **FMCSA regulation reference** (49 CFR
 
 ### `backend/tools/weather_tool.py`
 
-Synchronous LangGraph-callable wrapper around the async MCP weather server functions.
+Async-native LangGraph-callable wrapper around the MCP weather server functions (no `asyncio.run`, no `nest_asyncio`).
 
 **`get_weather(location, units=None) → dict`**
 
@@ -453,7 +505,7 @@ Synchronous LangGraph-callable wrapper around the async MCP weather server funct
 }
 ```
 
-**`nest_asyncio.apply()`** is called once at import time so `asyncio.run()` works correctly inside FastAPI's already-running event loop without raising `RuntimeError: This event loop is already running`.
+Both functions return `api_error: Optional[str]` when the upstream API fails so the agent can explain the degradation gracefully.
 
 ---
 
@@ -469,8 +521,19 @@ All routes are mounted at `/api/v1/` by `backend/main.py`.
 |---|---|---|
 | `query` | str | The user's question |
 | `thread_id` | str | Conversation thread ID for memory persistence (default: "default") |
+| `image_base64` | Optional[str] | Base64-encoded image for document extraction (BOL/receipt). When present, dispatcher routes to `document_agent`. |
 
 Response includes `latency_ms` calculated from request start to response.
+
+Additional production telemetry fields returned for UI transparency:
+- `llm_model`
+- `llm_provider`
+- `embedding_model`
+- `llm_comparison` (open vs closed model outputs + latency + error)
+- `agent_used`
+- `relevance_score` (safety agent only)
+- `flow_data` (LangGraph nodes/edges + execution_path for visualization)
+- `extracted_doc_data` (document_processing only)
 
 Error handling: returns HTTP 500 with `{"detail": "Query processing failed: {reason}"}` on exceptions.
 
@@ -508,16 +571,22 @@ The `messages` field uses `Annotated[list, add_messages]` which applies LangGrap
 
 ### State Mutation Pattern
 
-Each node receives the full `AgentState` dict and returns a **new dict** with updated fields:
+Each node receives the full `AgentState` dict and returns a **new dict** containing only the keys it wants to update.
+
+LangGraph merges these updates into the running state. This lets some nodes return partial updates (for example, the dispatcher returns only `{"query": ..., "intent": ...}`).
 
 ```python
-return {
-    **state,           # preserve all existing fields
-    "intent": intent,  # override only what this node computed
-}
+return {"intent": intent}
 ```
+This avoids accidental field overwrites and keeps node logic focused on only what it computes.
 
-This ensures no node accidentally clears fields set by a previous node.
+### Async execution
+
+All nodes are async and the graph is executed with `compiled.ainvoke(...)`. Sync-heavy calls (Google Maps client + RAG chain `.invoke`) run in worker threads to avoid blocking the FastAPI event loop.
+
+### UI flow visualization (`flow_data`)
+
+For each query, `run_graph()` also returns `flow_data` describing the LangGraph nodes/edges plus the `execution_path` taken (based on the evaluated intent). The Streamlit UI renders this via Graphviz to show exactly which agent node handled the request.
 
 ---
 
@@ -654,9 +723,7 @@ LangGraph dispatcher_node
 navigator_agent_node
     │
     ├─ Step 1: extract_locations("Route from Chicago IL to Detroit MI")
-    │       ChatOpenAI → {"origin": "Chicago, IL",
-    │                      "destination": "Detroit, MI",
-    │                      "found": true, "confidence": "high"}
+    │       ChatOpenAI.with_structured_output(LocationInfo) → LocationInfo(origin="Chicago, IL", destination="Detroit, MI", found=True)
     │
     ├─ Step 2: get_route("Chicago, IL", "Detroit, MI")
     │       ├── GOOGLE_MAPS_API_KEY set?
@@ -675,8 +742,8 @@ navigator_agent_node
     │                                   MI: permit_required=True)
     │
     ├─ Step 2b: get_route_weather("Chicago, IL", "Detroit, MI")
-    │       ├── weather_tool.py (sync wrapper, uses nest_asyncio)
-    │       │     └── asyncio.run(_fetch_route_weather(...))
+    │       ├── weather_tool.py (async-native)
+    │       │     └── await _fetch_route_weather(...)
     │       │           └── MCP weather server
     │       │                 ├── OPENWEATHERMAP_API_KEY set?
     │       │                 │     YES → asyncio.gather(
@@ -818,12 +885,10 @@ LangSmith is configured in a single place (`backend/config.py`) and activated vi
 
 ### How It Works — Implementation Detail
 
-`backend/config.py` is imported as the **first project module** in `backend/main.py`. It calls `load_dotenv()` and immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
+`backend/config.py` is imported as the **first project module** in `backend/main.py`. It loads settings from `.env` using Pydantic Settings, then immediately forwards the LangSmith variables into `os.environ` before any LangChain module is imported:
 
 ```python
 # backend/config.py  (runs before any langchain import)
-load_dotenv()
-
 os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
 os.environ["LANGCHAIN_API_KEY"]    = os.getenv("LANGCHAIN_API_KEY", "")
 os.environ["LANGCHAIN_PROJECT"]    = os.getenv("LANGCHAIN_PROJECT", "transOrchestra")
@@ -981,6 +1046,14 @@ Typical causes of low answer relevancy:
 
 ---
 
+## Ragas Results Snapshot
+
+Latest Ragas evaluation on the current `eval/eval_set.json`:
+
+| Retriever Strategy | Faithfulness | Answer Relevancy |
+|---|---:|---:|
+| Hybrid + Reranker | 0.7319 | 0.9294 |
+
 ## 14. Troubleshooting
 
 ### `chroma-hnswlib` build error on Windows
@@ -1101,23 +1174,9 @@ The system falls back to mock data automatically on any API failure, so the app 
 ### Weather card does not appear after a route query
 
 1. Confirm the query was classified as `route_query` — check the **Intent badge** in the chat. Only route queries populate `weather_data`.
-2. Confirm `nest_asyncio` is installed: `pip show nest_asyncio`. The package is required for `asyncio.run()` to work inside FastAPI's running event loop.
+2. Ensure the backend is on the latest refactor — `weather_tool.py` is async-native (no nest_asyncio needed). Restart uvicorn after upgrading.
 3. Check FastAPI logs for `Weather fetch error` — this means the OWM API call failed. The tool should fall back to mock data automatically; if you see an error card, check the `OPENWEATHERMAP_API_KEY` value in `.env`.
 4. If the card renders but shows `*(mock data)*`, add your `OPENWEATHERMAP_API_KEY` to `.env` and restart Uvicorn.
-
----
-
-### `nest_asyncio` AttributeError at startup
-
-```
-AttributeError: module 'nest_asyncio' has no attribute 'patch'
-```
-
-This error occurs with older versions of `nest_asyncio` that used `patch()` instead of `apply()`. The code uses `nest_asyncio.apply()`. Ensure you have version ≥ 1.5.9:
-
-```powershell
-pip install "nest_asyncio>=1.5.9"
-```
 
 ---
 

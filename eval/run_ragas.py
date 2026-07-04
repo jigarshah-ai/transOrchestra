@@ -1,6 +1,7 @@
 """Ragas evaluation script for TransOrchestra RAG pipeline."""
 
 import argparse
+import asyncio
 import json
 import sys
 import warnings
@@ -43,24 +44,16 @@ def build_hybrid_pipeline() -> Tuple:
     The fallback pair uses hybrid-only (no reranker) so evaluation continues
     gracefully when the Cohere API key is missing or invalid.
     """
-    from backend.rag.embeddings import get_embedding_model
-    from backend.rag.pipeline import build_rag_chain
-    from backend.rag.retriever import build_hybrid_retriever, build_reranking_retriever
-    from backend.rag.vectorstore import load_vectorstore
+    from backend.rag.manager import RagManager
 
-    embedding_model = get_embedding_model()
-    vectorstore = load_vectorstore(embedding_model)
-    docs = _get_docs_from_vectorstore(vectorstore)
-
-    hybrid = build_hybrid_retriever(vectorstore, docs)
-    retriever = build_reranking_retriever(hybrid, docs)
-    chain = build_rag_chain(retriever)
-
-    # Always build a pure-hybrid fallback for when the reranker call fails.
-    fallback_retriever = build_hybrid_retriever(vectorstore, docs)
-    fallback_chain = build_rag_chain(fallback_retriever)
-
-    return retriever, chain, fallback_retriever, fallback_chain
+    # Reuse one-time initialized resources.
+    resources = asyncio.run(RagManager.instance().get_resources())
+    return (
+        resources.reranking_retriever,
+        resources.reranking_chain,
+        resources.hybrid_retriever,
+        resources.hybrid_chain,
+    )
 
 
 def build_vector_only_pipeline() -> Tuple:
@@ -161,7 +154,8 @@ def _run_one_query(chain, retriever, question: str,
                 except Exception:
                     local_texts = []
                 ctx_texts = web_texts + local_texts
-                print("🌐", end=" ")
+                # Keep stdout ASCII-only for Windows cp1252 consoles.
+                print("[WEB]", end=" ")
             except Exception as exc2:
                 print(f"\n    [Web-context query failed: {exc2}]", end=" ")
 
@@ -171,7 +165,7 @@ def _run_one_query(chain, retriever, question: str,
 def run_evaluation(retriever, chain, eval_set: List[dict], label: str,
                    fallback_retriever=None, fallback_chain=None) -> dict:
     """Run the eval set through the pipeline and collect Ragas-compatible inputs."""
-    print(f"\n[{label}] Running {len(eval_set)} evaluation questions…")
+    print(f"\n[{label}] Running {len(eval_set)} evaluation questions...")
 
     # Ragas 0.1.x requires these exact singular column names.
     question_col, answer_col, contexts_col, ground_truth_col = [], [], [], []
@@ -179,7 +173,7 @@ def run_evaluation(retriever, chain, eval_set: List[dict], label: str,
     for i, item in enumerate(eval_set, 1):
         q = item["question"]
         gt = item["ground_truth"]
-        print(f"  [{i:02d}/{len(eval_set)}] {q[:70]}…", end=" ", flush=True)
+        print(f"  [{i:02d}/{len(eval_set)}] {q[:70]}...", end=" ", flush=True)
 
         answer, ctx_texts = _run_one_query(
             chain, retriever, q, fallback_chain, fallback_retriever
@@ -189,7 +183,7 @@ def run_evaluation(retriever, chain, eval_set: List[dict], label: str,
         answer_col.append(answer)
         contexts_col.append(ctx_texts)
         ground_truth_col.append(gt)
-        print("✓")
+        print("[OK]")
 
     return {
         "question": question_col,      # Ragas requires singular
@@ -200,22 +194,50 @@ def run_evaluation(retriever, chain, eval_set: List[dict], label: str,
 
 
 def compute_ragas_scores(eval_data: dict, label: str) -> dict:
-    """Run Ragas faithfulness + answer_relevancy evaluation."""
+    """Run Ragas faithfulness + answer_relevancy evaluation on a budget."""
     try:
         from datasets import Dataset
         from ragas import evaluate
         from ragas.metrics import answer_relevancy, faithfulness
+        from backend.config import settings
+        from backend.rag.embeddings import get_embedding_model
+        from backend.rag.llm_factory import build_chat_llm
+
+        # Use the same LLM provider as the app (OpenRouter-aware).
+        # - If running with OpenRouter, use the "closed" model id on OpenRouter.
+        # - Otherwise default to the configured LLM_MODEL.
+        eval_model = (
+            settings.LLM_MODEL_CLOSED
+            if settings.LLM_PROVIDER == "openrouter"
+            else settings.LLM_MODEL
+        )
+        evaluator_llm = build_chat_llm(model=eval_model, streaming=False)
+
+        # Avoid requiring OPENAI_API_KEY during evaluation.
+        # Prefer the repo's configured embedding model (defaults to BGE local).
+        try:
+            evaluator_embeddings = get_embedding_model(settings.EMBEDDING_MODEL)
+        except Exception:
+            evaluator_embeddings = get_embedding_model("BAAI/bge-small-en-v1.5")
 
         ds = Dataset.from_dict(eval_data)
-        print(f"\n[{label}] Running Ragas evaluation…")
-        result = evaluate(ds, metrics=[faithfulness, answer_relevancy])
+        print(f"\n[{label}] Running Ragas evaluation (using gpt-4o-mini to save $$)...")
+        
+        # 2. Pass the cheap LLM explicitly to the evaluate function
+        result = evaluate(
+            ds, 
+            metrics=[faithfulness, answer_relevancy],
+            llm=evaluator_llm,
+            embeddings=evaluator_embeddings
+        )
+        
         scores = {
             "faithfulness": round(float(result["faithfulness"]), 4),
             "answer_relevancy": round(float(result["answer_relevancy"]), 4),
         }
         return scores
     except Exception as exc:
-        print(f"  ⚠️  Ragas evaluation failed: {exc}")
+        print(f"  WARNING: Ragas evaluation failed: {exc}")
         return {"faithfulness": None, "answer_relevancy": None}
 
 
@@ -298,7 +320,7 @@ def main() -> None:
                 print(f" {metric.replace('_', ' ').title():<25} | {str(v):>12} | {str(h):>15}")
             print(f"{'='*65}")
         except Exception as exc:
-            print(f"  ⚠️  Comparison pipeline failed: {exc}")
+            print(f"  WARNING: Comparison pipeline failed: {exc}")
 
     # Save results.
     results_path = Path(__file__).parent / "results.json"
@@ -312,9 +334,9 @@ def main() -> None:
             }
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(saveable, f, indent=2)
-        print(f"\n💾 Results saved to {results_path}")
+        print(f"\nResults saved to {results_path}")
     except Exception as exc:
-        print(f"  ⚠️  Could not save results: {exc}")
+        print(f"  WARNING: Could not save results: {exc}")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import RunnablePassthrough
 
-from backend.config import LLM_MODEL, OPENAI_API_KEY, RELEVANCE_SCORE_THRESHOLD
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +39,9 @@ def _format_docs(docs: List[Document]) -> str:
 def build_rag_chain(retriever: BaseRetriever):
     """Build and return the full RAG chain: retrieve → format → prompt → LLM → parse."""
     try:
-        from langchain_openai import ChatOpenAI
+        from backend.rag.llm_factory import build_chat_llm
 
-        llm = ChatOpenAI(
-            model=LLM_MODEL,
-            temperature=0,
-            streaming=False,
-            openai_api_key=OPENAI_API_KEY,
-        )
+        llm = build_chat_llm(streaming=False)
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -64,7 +59,7 @@ def build_rag_chain(retriever: BaseRetriever):
             | llm
             | StrOutputParser()
         )
-        logger.info("RAG chain built successfully with model '%s'", LLM_MODEL)
+        logger.info("RAG chain built successfully with model '%s'", settings.LLM_MODEL)
         return chain
     except Exception as exc:
         logger.error("Failed to build RAG chain: %s", exc)
@@ -130,14 +125,9 @@ def run_query_with_web_context(
     Tavily content was previously prepended to the query string and lost.
     """
     try:
-        from langchain_openai import ChatOpenAI
+        from backend.rag.llm_factory import build_chat_llm
 
-        llm = ChatOpenAI(
-            model=LLM_MODEL,
-            temperature=0,
-            streaming=False,
-            openai_api_key=OPENAI_API_KEY,
-        )
+        llm = build_chat_llm(streaming=False)
 
         # Retrieve ChromaDB docs using the clean original query.
         try:

@@ -11,6 +11,7 @@ class AgentState(TypedDict):
 
     messages: Annotated[list, add_messages]
     query: str
+    image_data: Optional[str]                      # base64-encoded image for document processing
     intent: str
     vehicle_id: str
     cargo_type: str
@@ -19,6 +20,8 @@ class AgentState(TypedDict):
     rag_sources: List[Dict[str, Any]]
     web_search_used: bool
     final_answer: str
+    extracted_doc_data: Optional[Dict[str, Any]] # structured extraction result for document_processing
     thread_id: str
     route_data: Optional[Dict[str, Any]]    # populated by navigator_agent; None for all other intents
     weather_data: Optional[Dict[str, Any]]  # populated by navigator_agent via MCP weather server
+    relevance_score: Optional[float]        # populated by safety_agent when available
